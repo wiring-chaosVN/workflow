@@ -1,4 +1,4 @@
-name: Build EN751221 256M
+name: Build EN751221 256M FULL
 
 on:
   workflow_dispatch:
@@ -38,7 +38,7 @@ jobs:
             git \
             libncurses5-dev \
             libssl-dev \
-            python3-distutils \
+            python3 \
             python3-setuptools \
             rsync \
             unzip \
@@ -46,91 +46,161 @@ jobs:
             file \
             wget
 
-      - name: Patch EN751221 memory
+      - name: Patch EN751221 256M DTS
         shell: bash
         run: |
           set -e
 
           DTS="target/linux/econet/dts/en751221_generic.dts"
 
-          echo "=== Original DTS ==="
-          sed -n '1,200p' "$DTS"
-
           python3 - <<'PY'
           from pathlib import Path
 
-          path = Path("target/linux/econet/dts/en751221_generic.dts")
-          data = path.read_text()
+          p = Path("target/linux/econet/dts/en751221_generic.dts")
+          s = p.read_text()
 
-          old_reg = "reg = <0x00000000 0x4000000>;"
-          new_reg = "reg = <0x00000000 0x10000000>;"
+          replacements = [
+              (
+                  "reg = <0x00000000 0x4000000>;",
+                  "reg = <0x00000000 0x10000000>;"
+              ),
+              (
+                  "linux,usable-memory-range = <0x00020000 0x3fe0000>;",
+                  "linux,usable-memory-range = <0x00020000 0x0ffe0000>;"
+              ),
+          ]
 
-          old_range = "linux,usable-memory-range = <0x00020000 0x3fe0000>;"
-          new_range = "linux,usable-memory-range = <0x00020000 0x0ffe0000>;"
+          for old, new in replacements:
+              if old not in s:
+                  raise SystemExit(
+                      f"ERROR: expected DTS text not found: {old}"
+                  )
+              s = s.replace(old, new, 1)
 
-          if old_reg not in data:
-              raise SystemExit("ERROR: Original RAM reg definition was not found")
+          # Enable both PCIe controllers for hardware discovery.
+          s += r'''
 
-          if old_range not in data:
-              raise SystemExit("ERROR: Original linux,usable-memory-range definition was not found")
+          &pcie0 {
+              status = "okay";
+          };
 
-          data = data.replace(old_reg, new_reg, 1)
-          data = data.replace(old_range, new_range, 1)
+          &pcie1 {
+              status = "okay";
+          };
+          '''
 
-          path.write_text(data)
+          p.write_text(s)
           PY
 
-          echo
-          echo "=== Patched DTS ==="
-          grep -n -E 'reg =|linux,usable-memory-range' "$DTS"
+          echo "=== EN751221 DTS ==="
+          sed -n '1,260p' "$DTS"
 
-      - name: Configure target
+      - name: Configure EN751221 FULL test image
         run: |
           cat > .config <<'EOF'
           CONFIG_TARGET_econet=y
           CONFIG_TARGET_econet_en751221=y
           CONFIG_TARGET_econet_en751221_DEVICE_en751221_generic=y
           CONFIG_TARGET_ROOTFS_INITRAMFS=y
+
+          # EN751221 / NAND / PCIe
+          CONFIG_SPI_AIROHA_SNFI=y
+          CONFIG_MTD_NAND_MTK_BMT=y
+
+          # MT7615 PCIe Wi-Fi
+          CONFIG_PACKAGE_kmod-mt7615e=y
+          CONFIG_PACKAGE_kmod-mt7615-firmware=y
+
+          # USB
+          CONFIG_PACKAGE_kmod-usb2=y
+          CONFIG_PACKAGE_kmod-usb3=y
+          CONFIG_PACKAGE_kmod-usb-storage=y
+          CONFIG_PACKAGE_usbutils=y
+
+          # PCI / Ethernet diagnostics
+          CONFIG_PACKAGE_pciutils=y
+          CONFIG_PACKAGE_ethtool=y
+
+          # I2C / GPIO diagnostics
+          CONFIG_PACKAGE_i2c-tools=y
+          CONFIG_PACKAGE_gpio-tools=y
+
+          # Router stack
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-ssl=y
+          CONFIG_PACKAGE_uhttpd=y
+          CONFIG_PACKAGE_firewall4=y
+          CONFIG_PACKAGE_nftables=y
+          CONFIG_PACKAGE_dnsmasq-full=y
+          CONFIG_PACKAGE_odhcp6c=y
+          CONFIG_PACKAGE_odhcpd-ipv6only=y
+
+          # PPPoE
+          CONFIG_PACKAGE_ppp=y
+          CONFIG_PACKAGE_ppp-mod-pppoe=y
+          CONFIG_PACKAGE_kmod-pppoe=y
+
+          # Wi-Fi userspace
+          CONFIG_PACKAGE_wpad-basic-mbedtls=y
+
+          # Debug / recovery
+          CONFIG_PACKAGE_strace=y
+          CONFIG_PACKAGE_tcpdump=y
+          CONFIG_PACKAGE_curl=y
+          CONFIG_PACKAGE_wget-ssl=y
+          CONFIG_PACKAGE_htop=y
+          CONFIG_PACKAGE_mtd=y
+          CONFIG_PACKAGE_nand-utils=y
+          CONFIG_PACKAGE_ubi-utils=y
           EOF
 
           make defconfig
 
           echo
-          echo "=== Target configuration ==="
-          grep -E '^CONFIG_TARGET_(econet|ROOTFS_INITRAMFS)' .config || true
+          echo "=== FINAL IMPORTANT CONFIG ==="
+          grep -E \
+            '^(CONFIG_TARGET_|CONFIG_SPI_AIROHA_SNFI|CONFIG_MTD_NAND_MTK_BMT|CONFIG_PACKAGE_(luci|uhttpd|firewall4|dnsmasq|ppp|kmod-mt7615|wpad|kmod-usb|pciutils|usbutils|nand-utils|ubi-utils|mtd))' \
+            .config | sort
 
       - name: Build
         run: |
           make -j2 V=s
 
-      - name: List output
+      - name: Verify output
         run: |
           set -e
 
           OUT="bin/targets/econet/en751221"
 
+          test -d "$OUT"
+
           echo "=== OUTPUT DIRECTORY ==="
           ls -lah "$OUT"
 
           echo
-          echo "=== OUTPUT FILES ==="
-          find "$OUT" -maxdepth 1 -type f -printf '%f\n' | sort
+          echo "=== FILE TYPES ==="
+          find "$OUT" -maxdepth 1 -type f -exec file {} \;
 
           echo
           echo "=== SHA256 ==="
-          find "$OUT" -maxdepth 1 -type f -exec sha256sum {} +
+          find "$OUT" -maxdepth 1 -type f -exec sha256sum {} + | sort
 
-      - name: Upload images
+          echo
+          echo "=== SIZES ==="
+          find "$OUT" -maxdepth 1 -type f \
+            -printf '%f %s bytes\n' | sort
+
+      - name: Upload Build #1
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-en751221-256m
+          name: openwrt-en751221-build1-256m-full
           path: bin/targets/econet/en751221/
           if-no-files-found: error
 
       - name: Show build information
         if: always()
         run: |
-          echo "=== Git revision ==="
+          echo "=== OpenWrt revision ==="
           git rev-parse HEAD || true
 
           echo
