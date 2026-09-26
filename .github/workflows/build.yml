@@ -17,6 +17,7 @@ jobs:
 
       - name: Free runner disk space
         run: |
+          set -eux
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /opt/ghc
@@ -25,6 +26,7 @@ jobs:
 
       - name: Install build dependencies
         run: |
+          set -eux
           sudo apt-get update
           sudo apt-get install -y \
             build-essential \
@@ -40,16 +42,26 @@ jobs:
             libssl-dev \
             python3 \
             python3-setuptools \
+            python3-pip \
             rsync \
             unzip \
             zlib1g-dev \
             file \
-            wget
+            wget \
+            curl \
+            xsltproc
+
+      - name: Update and install OpenWrt feeds
+        run: |
+          set -eux
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+          ./scripts/feeds list
 
       - name: Patch EN751221 256M DTS
         shell: bash
         run: |
-          set -e
+          set -eux
 
           DTS="target/linux/econet/dts/en751221_generic.dts"
 
@@ -75,9 +87,9 @@ jobs:
                   raise SystemExit(
                       f"ERROR: expected DTS text not found: {old}"
                   )
+
               s = s.replace(old, new, 1)
 
-          # Enable both PCIe controllers for hardware discovery.
           s += r'''
 
           &pcie0 {
@@ -92,117 +104,356 @@ jobs:
           p.write_text(s)
           PY
 
-          echo "=== EN751221 DTS ==="
-          sed -n '1,260p' "$DTS"
+          sed -n '1,320p' "$DTS"
 
-      - name: Configure EN751221 FULL test image
+      - name: Configure EN751221 FULL image
+        shell: bash
         run: |
+          set -eux
+
           cat > .config <<'EOF'
           CONFIG_TARGET_econet=y
           CONFIG_TARGET_econet_en751221=y
           CONFIG_TARGET_econet_en751221_DEVICE_en751221_generic=y
           CONFIG_TARGET_ROOTFS_INITRAMFS=y
 
-          # EN751221 / NAND / PCIe
+          CONFIG_PACKAGE_base-files=y
+          CONFIG_PACKAGE_netifd=y
+
           CONFIG_SPI_AIROHA_SNFI=y
+          CONFIG_MTD_NAND_CORE=y
+          CONFIG_MTD_NAND_ECC=y
           CONFIG_MTD_NAND_MTK_BMT=y
 
-          # MT7615 PCIe Wi-Fi
-          CONFIG_PACKAGE_kmod-mt7615e=y
-          CONFIG_PACKAGE_kmod-mt7615-firmware=y
+          CONFIG_PCIEAER=y
+          CONFIG_PCIEPORTBUS=y
+          CONFIG_PCIE_MEDIATEK=y
+          CONFIG_PCI_DISABLE_COMMON_QUIRKS=y
+          CONFIG_PCI_DOMAINS=y
+          CONFIG_PCI_DOMAINS_GENERIC=y
+          CONFIG_PCI_DRIVERS_GENERIC=y
+          CONFIG_PCI_MSI=y
+          CONFIG_PHY_ECONET_PCIE=y
 
-          # USB
-          CONFIG_PACKAGE_kmod-usb2=y
-          CONFIG_PACKAGE_kmod-usb3=y
-          CONFIG_PACKAGE_kmod-usb-storage=y
-          CONFIG_PACKAGE_usbutils=y
-
-          # PCI / Ethernet diagnostics
+          CONFIG_PACKAGE_ethtool-full=y
           CONFIG_PACKAGE_pciutils=y
-          CONFIG_PACKAGE_ethtool=y
+          CONFIG_PACKAGE_mdio-tools=y
 
-          # I2C / GPIO diagnostics
-          CONFIG_PACKAGE_i2c-tools=y
-          CONFIG_PACKAGE_gpio-tools=y
-
-          # Router stack
-          CONFIG_PACKAGE_luci=y
-          CONFIG_PACKAGE_luci-ssl=y
-          CONFIG_PACKAGE_uhttpd=y
-          CONFIG_PACKAGE_firewall4=y
-          CONFIG_PACKAGE_nftables=y
           CONFIG_PACKAGE_dnsmasq-full=y
+          CONFIG_PACKAGE_firewall4=y
+          CONFIG_PACKAGE_nftables-json=y
+          CONFIG_PACKAGE_odhcpd=y
           CONFIG_PACKAGE_odhcp6c=y
-          CONFIG_PACKAGE_odhcpd-ipv6only=y
 
-          # PPPoE
           CONFIG_PACKAGE_ppp=y
           CONFIG_PACKAGE_ppp-mod-pppoe=y
           CONFIG_PACKAGE_kmod-pppoe=y
 
-          # Wi-Fi userspace
-          CONFIG_PACKAGE_wpad-basic-mbedtls=y
+          CONFIG_PACKAGE_kmod-wireguard=y
+          CONFIG_PACKAGE_wireguard-tools=y
+          CONFIG_PACKAGE_luci-proto-wireguard=y
 
-          # Debug / recovery
-          CONFIG_PACKAGE_strace=y
-          CONFIG_PACKAGE_tcpdump=y
-          CONFIG_PACKAGE_curl=y
-          CONFIG_PACKAGE_wget-ssl=y
-          CONFIG_PACKAGE_htop=y
+          CONFIG_PACKAGE_kmod-mt7615e=y
+          CONFIG_PACKAGE_kmod-mt7615-firmware=y
+          CONFIG_PACKAGE_wpad-mbedtls=y
+          CONFIG_PACKAGE_iw=y
+          CONFIG_PACKAGE_iwinfo=y
+
+          CONFIG_PACKAGE_kmod-usb-core=y
+          CONFIG_PACKAGE_kmod-usb2=y
+          CONFIG_PACKAGE_kmod-usb3=y
+          CONFIG_PACKAGE_kmod-usb-storage=y
+          CONFIG_PACKAGE_kmod-usb-storage-uas=y
+          CONFIG_PACKAGE_kmod-scsi-core=y
+          CONFIG_PACKAGE_usbutils=y
+
+          CONFIG_PACKAGE_kmod-fs-ext4=y
+          CONFIG_PACKAGE_kmod-fs-vfat=y
+          CONFIG_PACKAGE_kmod-fs-ntfs3=y
+          CONFIG_PACKAGE_kmod-fs-exfat=y
+
+          CONFIG_PACKAGE_i2c-tools=y
+          CONFIG_PACKAGE_kmod-i2c-dev=y
+          CONFIG_PACKAGE_gpiod-tools=y
+          CONFIG_PACKAGE_kmod-gpio-button-hotplug=y
+          CONFIG_PACKAGE_kmod-leds-gpio=y
+
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-ssl-openssl=y
+          CONFIG_PACKAGE_luci-i18n-base-vi=y
+          CONFIG_PACKAGE_luci-base=y
+          CONFIG_PACKAGE_luci-light=y
+          CONFIG_PACKAGE_luci-mod-admin-full=y
+          CONFIG_PACKAGE_luci-mod-network=y
+          CONFIG_PACKAGE_luci-mod-status=y
+          CONFIG_PACKAGE_luci-mod-system=y
+          CONFIG_PACKAGE_luci-theme-bootstrap=y
+
+          CONFIG_PACKAGE_luci-app-firewall=y
+          CONFIG_PACKAGE_luci-app-package-manager=y
+          CONFIG_PACKAGE_luci-app-uhttpd=y
+          CONFIG_PACKAGE_luci-app-attendedsysupgrade=y
+          CONFIG_PACKAGE_luci-proto-ipv6=y
+          CONFIG_PACKAGE_luci-proto-ppp=y
+
+          CONFIG_PACKAGE_luci-app-sqm=y
+          CONFIG_PACKAGE_sqm-scripts=y
+          CONFIG_PACKAGE_kmod-sched-cake=y
+
+          CONFIG_PACKAGE_luci-app-nlbwmon=y
+          CONFIG_PACKAGE_nlbwmon=y
+
+          CONFIG_PACKAGE_luci-app-statistics=y
+          CONFIG_PACKAGE_collectd=y
+
+          CONFIG_PACKAGE_luci-app-adblock=y
+          CONFIG_PACKAGE_adblock=y
+
+          CONFIG_PACKAGE_luci-app-ksmbd=y
+          CONFIG_PACKAGE_ksmbd-server=y
+
+          CONFIG_PACKAGE_luci-i18n-firewall-vi=y
+          CONFIG_PACKAGE_luci-i18n-package-manager-vi=y
+          CONFIG_PACKAGE_luci-i18n-uhttpd-vi=y
+          CONFIG_PACKAGE_luci-i18n-attendedsysupgrade-vi=y
+          CONFIG_PACKAGE_luci-i18n-sqm-vi=y
+          CONFIG_PACKAGE_luci-i18n-nlbwmon-vi=y
+          CONFIG_PACKAGE_luci-i18n-statistics-vi=y
+          CONFIG_PACKAGE_luci-i18n-adblock-vi=y
+          CONFIG_PACKAGE_luci-i18n-ksmbd-vi=y
+
+          CONFIG_PACKAGE_rpcd=y
+          CONFIG_PACKAGE_rpcd-mod-file=y
+          CONFIG_PACKAGE_rpcd-mod-iwinfo=y
+          CONFIG_PACKAGE_rpcd-mod-luci=y
+          CONFIG_PACKAGE_rpcd-mod-ucode=y
+
+          CONFIG_PACKAGE_uhttpd=y
+          CONFIG_PACKAGE_uhttpd-mod-ubus=y
+          CONFIG_PACKAGE_uhttpd-mod-ucode=y
+
           CONFIG_PACKAGE_mtd=y
           CONFIG_PACKAGE_nand-utils=y
           CONFIG_PACKAGE_ubi-utils=y
+          CONFIG_PACKAGE_block-mount=y
+          CONFIG_PACKAGE_e2fsprogs=y
+          CONFIG_PACKAGE_fdisk=y
+          CONFIG_PACKAGE_mount-utils=y
+
+          CONFIG_PACKAGE_dropbear=y
+
+          CONFIG_PACKAGE_zoneinfo-asia=y
+
+          CONFIG_PACKAGE_tcpdump=y
+          CONFIG_PACKAGE_strace=y
+          CONFIG_PACKAGE_curl=y
+          CONFIG_PACKAGE_wget-ssl=y
+          CONFIG_PACKAGE_iperf3=y
+          CONFIG_PACKAGE_htop=y
+          CONFIG_PACKAGE_btop=y
+          CONFIG_PACKAGE_nano=y
+          CONFIG_PACKAGE_lsof=y
+          CONFIG_PACKAGE_socat=y
+          CONFIG_PACKAGE_procps-ng=y
+          CONFIG_PACKAGE_tree=y
           EOF
 
           make defconfig
 
-          echo
-          echo "=== FINAL IMPORTANT CONFIG ==="
           grep -E \
-            '^(CONFIG_TARGET_|CONFIG_SPI_AIROHA_SNFI|CONFIG_MTD_NAND_MTK_BMT|CONFIG_PACKAGE_(luci|uhttpd|firewall4|dnsmasq|ppp|kmod-mt7615|wpad|kmod-usb|pciutils|usbutils|nand-utils|ubi-utils|mtd))' \
+            '^(CONFIG_TARGET_|CONFIG_SPI_AIROHA_SNFI|CONFIG_MTD_NAND|CONFIG_PCIE|CONFIG_PCI_|CONFIG_PHY_ECONET_PCIE|CONFIG_PACKAGE_)' \
             .config | sort
 
-      - name: Build
+      - name: Validate requested configuration
+        shell: bash
         run: |
+          set -eux
+
+          REQUIRED='
+          CONFIG_TARGET_econet=y
+          CONFIG_TARGET_econet_en751221=y
+          CONFIG_TARGET_econet_en751221_DEVICE_en751221_generic=y
+          CONFIG_TARGET_ROOTFS_INITRAMFS=y
+          CONFIG_SPI_AIROHA_SNFI=y
+          CONFIG_MTD_NAND_CORE=y
+          CONFIG_MTD_NAND_ECC=y
+          CONFIG_MTD_NAND_MTK_BMT=y
+          CONFIG_PCIEAER=y
+          CONFIG_PCIEPORTBUS=y
+          CONFIG_PCIE_MEDIATEK=y
+          CONFIG_PCI_DOMAINS=y
+          CONFIG_PCI_DOMAINS_GENERIC=y
+          CONFIG_PCI_DRIVERS_GENERIC=y
+          CONFIG_PCI_MSI=y
+          CONFIG_PHY_ECONET_PCIE=y
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-base=y
+          CONFIG_PACKAGE_luci-mod-admin-full=y
+          CONFIG_PACKAGE_luci-mod-network=y
+          CONFIG_PACKAGE_luci-mod-status=y
+          CONFIG_PACKAGE_luci-mod-system=y
+          CONFIG_PACKAGE_luci-theme-bootstrap=y
+          CONFIG_PACKAGE_luci-app-firewall=y
+          CONFIG_PACKAGE_luci-app-package-manager=y
+          CONFIG_PACKAGE_luci-app-uhttpd=y
+          CONFIG_PACKAGE_uhttpd=y
+          CONFIG_PACKAGE_uhttpd-mod-ubus=y
+          CONFIG_PACKAGE_rpcd=y
+          CONFIG_PACKAGE_rpcd-mod-luci=y
+          CONFIG_PACKAGE_kmod-mt7615e=y
+          CONFIG_PACKAGE_kmod-mt7615-firmware=y
+          CONFIG_PACKAGE_kmod-usb2=y
+          CONFIG_PACKAGE_kmod-usb3=y
+          CONFIG_PACKAGE_kmod-usb-storage=y
+          CONFIG_PACKAGE_dnsmasq-full=y
+          CONFIG_PACKAGE_firewall4=y
+          CONFIG_PACKAGE_nftables-json=y
+          CONFIG_PACKAGE_ppp=y
+          CONFIG_PACKAGE_ppp-mod-pppoe=y
+          CONFIG_PACKAGE_kmod-pppoe=y
+          CONFIG_PACKAGE_kmod-wireguard=y
+          CONFIG_PACKAGE_wireguard-tools=y
+          CONFIG_PACKAGE_mtd=y
+          CONFIG_PACKAGE_nand-utils=y
+          CONFIG_PACKAGE_ubi-utils=y
+          '
+
+          FAILED=0
+
+          while IFS= read -r line; do
+            [ -z "$line" ] && continue
+
+            if ! grep -qxF "$line" .config; then
+              echo "MISSING CONFIG: $line"
+              FAILED=1
+            fi
+          done <<< "$REQUIRED"
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo "ERROR: One or more required CONFIG options were dropped."
+            exit 1
+          fi
+
+          echo "All critical configuration options survived defconfig."
+
+      - name: Build OpenWrt
+        shell: bash
+        run: |
+          set -eux
           make -j2 V=s
 
-      - name: Verify output
+      - name: Verify built root filesystem
+        shell: bash
         run: |
-          set -e
+          set -eux
+
+          ROOTS=$(find build_dir staging_dir \
+            -type d \
+            \( -name 'root-*' -o -name 'root' \) \
+            2>/dev/null || true)
+
+          ROOTFS=""
+
+          while IFS= read -r candidate; do
+            [ -z "$candidate" ] && continue
+
+            if [ -d "$candidate/usr/share/luci" ]; then
+              ROOTFS="$candidate"
+              break
+            fi
+          done <<< "$ROOTS"
+
+          if [ -z "$ROOTFS" ]; then
+            echo "ERROR: LuCI directory not found."
+            exit 1
+          fi
+
+          test -d "$ROOTFS/usr/share/luci"
+          test -d "$ROOTFS/www"
+          test -e "$ROOTFS/etc/config/uhttpd"
+          test -e "$ROOTFS/etc/config/firewall"
+
+          find "$ROOTFS/usr/share/luci" \
+            -maxdepth 2 \
+            -type f \
+            | head -100
+
+          find "$ROOTFS/www" \
+            -maxdepth 3 \
+            -type f \
+            | sort \
+            | head -100
+
+          find "$ROOTFS/lib/modules" \
+            -type f \
+            | grep -E 'mt7615|mt76' \
+            | sort || true
+
+          find "$ROOTFS/lib/modules" \
+            -type f \
+            | grep -E 'usb|xhci|ehci|ohci|uas|scsi' \
+            | sort || true
+
+          find "$ROOTFS/usr" \
+            -type f \
+            | grep -E '/(nanddump|nandwrite|flash_erase|mtdinfo|ubinfo|ubiattach|ubidetach|ubiformat)$' \
+            | sort || true
+
+      - name: Verify output
+        shell: bash
+        run: |
+          set -eux
 
           OUT="bin/targets/econet/en751221"
 
           test -d "$OUT"
 
-          echo "=== OUTPUT DIRECTORY ==="
           ls -lah "$OUT"
 
-          echo
-          echo "=== FILE TYPES ==="
-          find "$OUT" -maxdepth 1 -type f -exec file {} \;
+          find "$OUT" \
+            -maxdepth 1 \
+            -type f \
+            -exec file {} \;
 
-          echo
-          echo "=== SHA256 ==="
-          find "$OUT" -maxdepth 1 -type f -exec sha256sum {} + | sort
+          find "$OUT" \
+            -maxdepth 1 \
+            -type f \
+            -printf '%f %s bytes\n' \
+            | sort
 
-          echo
-          echo "=== SIZES ==="
-          find "$OUT" -maxdepth 1 -type f \
-            -printf '%f %s bytes\n' | sort
+          find "$OUT" \
+            -maxdepth 1 \
+            -type f \
+            -exec sha256sum {} \; \
+            | sort
 
-      - name: Upload Build #1
+      - name: Save build metadata
+        shell: bash
+        run: |
+          set -eux
+
+          OUT="bin/targets/econet/en751221"
+          mkdir -p "$OUT/build-info"
+
+          cp .config \
+            "$OUT/build-info/config"
+
+          cp target/linux/econet/dts/en751221_generic.dts \
+            "$OUT/build-info/en751221_generic.dts"
+
+          git rev-parse HEAD \
+            > "$OUT/build-info/openwrt-revision.txt"
+
+          date -u \
+            > "$OUT/build-info/build-time-utc.txt"
+
+          cat "$OUT/build-info/openwrt-revision.txt"
+          cat "$OUT/build-info/build-time-utc.txt"
+
+      - name: Upload Build #2 FULL LUCI
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-en751221-build1-256m-full
+          name: openwrt-en751221-build2-256m-full-luci
           path: bin/targets/econet/en751221/
           if-no-files-found: error
-
-      - name: Show build information
-        if: always()
-        run: |
-          echo "=== OpenWrt revision ==="
-          git rev-parse HEAD || true
-
-          echo
-          echo "=== Target output ==="
-          ls -lah bin/targets/econet/en751221/ 2>/dev/null || true
+          retention-days: 7
