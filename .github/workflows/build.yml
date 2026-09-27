@@ -77,13 +77,17 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-openwrt-downloads-
 
-      - name: Update and install OpenWrt feeds
+      - name: Update and install required OpenWrt feeds
         shell: bash
         run: |
           set -eux
 
-          ./scripts/feeds update -a
-          ./scripts/feeds install -a
+          ./scripts/feeds update packages
+          ./scripts/feeds update luci
+
+          ./scripts/feeds install -a -p packages
+          ./scripts/feeds install -a -p luci
+
           ./scripts/feeds list
 
       - name: Patch EN751221 256M DTS
@@ -118,7 +122,8 @@ jobs:
 
               s = s.replace(old, new, 1)
 
-          s += r'''
+          if "&pcie0 {" not in s:
+              s += r'''
 
           &pcie0 {
               status = "okay";
@@ -176,8 +181,6 @@ jobs:
           CONFIG_PACKAGE_mdio-tools=y
           CONFIG_PACKAGE_ip-full=y
           CONFIG_PACKAGE_ip-bridge=y
-          CONFIG_PACKAGE_ip-legacy=y
-          CONFIG_PACKAGE_bridge=y
 
           CONFIG_PACKAGE_dnsmasq-full=y
           CONFIG_PACKAGE_firewall4=y
@@ -222,7 +225,6 @@ jobs:
           CONFIG_PACKAGE_kmod-leds-gpio=y
 
           CONFIG_PACKAGE_kmod-nf-conntrack=y
-          CONFIG_PACKAGE_kmod-nf-conntrack6=y
           CONFIG_PACKAGE_kmod-nf-nat=y
           CONFIG_PACKAGE_kmod-nf-nat6=y
           CONFIG_PACKAGE_kmod-nf-reject=y
@@ -315,9 +317,9 @@ jobs:
 
           make defconfig
 
-          grep -E \
-            '^(CONFIG_TARGET_|CONFIG_PACKAGE_)' \
-            .config | sort
+          echo
+          echo "Final selected configuration:"
+          grep -E '^(CONFIG_TARGET_|CONFIG_PACKAGE_)' .config | sort
 
       - name: Validate requested configuration
         shell: bash
@@ -359,11 +361,8 @@ jobs:
 
           CONFIG_PACKAGE_ip-full=y
           CONFIG_PACKAGE_ip-bridge=y
-          CONFIG_PACKAGE_ip-legacy=y
-          CONFIG_PACKAGE_bridge=y
 
           CONFIG_PACKAGE_kmod-nf-conntrack=y
-          CONFIG_PACKAGE_kmod-nf-conntrack6=y
           CONFIG_PACKAGE_kmod-nf-nat=y
           CONFIG_PACKAGE_kmod-nf-nat6=y
           CONFIG_PACKAGE_kmod-nf-reject=y
@@ -412,10 +411,12 @@ jobs:
           done <<< "$REQUIRED"
 
           if [ "$FAILED" -ne 0 ]; then
+            echo
             echo "ERROR: One or more required CONFIG options were dropped."
             exit 1
           fi
 
+          echo
           echo "All critical configuration options survived defconfig."
 
       - name: Cache OpenWrt build tree
@@ -425,6 +426,9 @@ jobs:
             build_dir
             staging_dir
           key: ${{ runner.os }}-openwrt-en751221-build-${{ env.OPENWRT_REV }}-${{ hashFiles('.config', 'target/linux/econet/**', 'target/linux/generic/**', 'package/**', 'feeds.conf.default', 'include/**', 'scripts/**') }}
+          restore-keys: |
+            ${{ runner.os }}-openwrt-en751221-build-${{ env.OPENWRT_REV }}-
+            ${{ runner.os }}-openwrt-en751221-build-
 
       - name: Build OpenWrt
         shell: bash
