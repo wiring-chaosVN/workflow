@@ -307,6 +307,15 @@ jobs:
 
           echo "All critical configuration options survived defconfig."
 
+      - name: Synchronize Linux kernel config
+        shell: bash
+        run: |
+          set -eux
+
+          echo "Synchronizing kernel Kconfig using default answers..."
+
+          yes '' | make -j1 kernel_oldconfig V=s
+
       - name: Build OpenWrt
         shell: bash
         run: |
