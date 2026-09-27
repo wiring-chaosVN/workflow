@@ -106,6 +106,28 @@ jobs:
 
           sed -n '1,320p' "$DTS"
 
+      - name: Fix EN751221 kernel config
+        shell: bash
+        run: |
+          set -eux
+
+          CONFIG="target/linux/econet/en751221/config-6.18"
+
+          test -f "$CONFIG"
+
+          if ! grep -qxF '# CONFIG_MEDIATEK_GE_SOC_PHY is not set' "$CONFIG"; then
+            printf '%s\n' '# CONFIG_MEDIATEK_GE_SOC_PHY is not set' >> "$CONFIG"
+          fi
+
+          echo "EN751221 kernel PHY config:"
+          grep -E \
+            '^(CONFIG_PHYLIB|CONFIG_MEDIATEK_GE_PHY|CONFIG_MTK_NET_PHYLIB|CONFIG_MEDIATEK_GE_SOC_PHY|# CONFIG_MEDIATEK_GE_SOC_PHY)' \
+            "$CONFIG" || true
+
+          echo
+          echo "Full target kernel config:"
+          cat "$CONFIG"
+
       - name: Configure EN751221 FULL image
         shell: bash
         run: |
@@ -306,10 +328,6 @@ jobs:
           fi
 
           echo "All critical configuration options survived defconfig."
-
-      # IMPORTANT:
-      # Do NOT add a separate kernel_oldconfig step here.
-      # target/linux/prepare performs the kernel oldconfig itself.
 
       - name: Build OpenWrt
         shell: bash
