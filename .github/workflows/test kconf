@@ -1,0 +1,76 @@
+name: Test EN751221 Kconfig
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout OpenWrt
+        uses: actions/checkout@v4
+        with:
+          repository: openwrt/openwrt
+          ref: main
+          fetch-depth: 1
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential \
+            clang \
+            flex \
+            bison \
+            gawk \
+            gcc-multilib \
+            g++-multilib \
+            gettext \
+            git \
+            libncurses5-dev \
+            libssl-dev \
+            python3 \
+            rsync \
+            unzip \
+            zlib1g-dev \
+            file \
+            wget \
+            curl \
+            xsltproc
+
+      - name: Update feeds
+        run: |
+          ./scripts/feeds update -a
+          ./scripts/feeds install -a
+
+      - name: Configure target
+        shell: bash
+        run: |
+          set -eux
+
+          cat > .config <<'EOF'
+          CONFIG_TARGET_econet=y
+          CONFIG_TARGET_econet_en751221=y
+          CONFIG_TARGET_econet_en751221_DEVICE_en751221_generic=y
+          CONFIG_TARGET_ROOTFS_INITRAMFS=y
+          EOF
+
+          make defconfig
+
+      - name: Test kernel Kconfig
+        shell: bash
+        run: |
+          set -eux
+
+          echo "Testing kernel Kconfig only..."
+
+          set +e
+          yes '' | make -j1 kernel_oldconfig V=s
+          rc_make="${PIPESTATUS[1]}"
+          set -e
+
+          echo "kernel_oldconfig exit code: $rc_make"
+
+          test "$rc_make" -eq 0
+          echo "Kconfig test PASSED."
