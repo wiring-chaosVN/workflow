@@ -325,6 +325,7 @@ jobs:
 
             if ! grep -qxF "$line" .config; then
               echo "MISSING CONFIG: $line"
+              grep -E "^#? ?${line%%=*}" .config || true
               FAILED=1
             fi
           done <<< "$REQUIRED"
