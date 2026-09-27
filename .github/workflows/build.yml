@@ -120,21 +120,6 @@ jobs:
           CONFIG_PACKAGE_base-files=y
           CONFIG_PACKAGE_netifd=y
 
-          CONFIG_SPI_AIROHA_SNFI=y
-          CONFIG_MTD_NAND_CORE=y
-          CONFIG_MTD_NAND_ECC=y
-          CONFIG_MTD_NAND_MTK_BMT=y
-
-          CONFIG_PCIEAER=y
-          CONFIG_PCIEPORTBUS=y
-          CONFIG_PCIE_MEDIATEK=y
-          CONFIG_PCI_DISABLE_COMMON_QUIRKS=y
-          CONFIG_PCI_DOMAINS=y
-          CONFIG_PCI_DOMAINS_GENERIC=y
-          CONFIG_PCI_DRIVERS_GENERIC=y
-          CONFIG_PCI_MSI=y
-          CONFIG_PHY_ECONET_PCIE=y
-
           CONFIG_PACKAGE_ethtool-full=y
           CONFIG_PACKAGE_pciutils=y
           CONFIG_PACKAGE_mdio-tools=y
@@ -183,7 +168,6 @@ jobs:
           CONFIG_PACKAGE_luci-i18n-base-vi=y
           CONFIG_PACKAGE_luci-base=y
           CONFIG_PACKAGE_luci-light=y
-          CONFIG_PACKAGE_luci-mod-admin-full=y
           CONFIG_PACKAGE_luci-mod-network=y
           CONFIG_PACKAGE_luci-mod-status=y
           CONFIG_PACKAGE_luci-mod-system=y
@@ -241,7 +225,6 @@ jobs:
           CONFIG_PACKAGE_mount-utils=y
 
           CONFIG_PACKAGE_dropbear=y
-
           CONFIG_PACKAGE_zoneinfo-asia=y
 
           CONFIG_PACKAGE_tcpdump=y
@@ -261,7 +244,7 @@ jobs:
           make defconfig
 
           grep -E \
-            '^(CONFIG_TARGET_|CONFIG_SPI_AIROHA_SNFI|CONFIG_MTD_NAND|CONFIG_PCIE|CONFIG_PCI_|CONFIG_PHY_ECONET_PCIE|CONFIG_PACKAGE_)' \
+            '^(CONFIG_TARGET_|CONFIG_PACKAGE_)' \
             .config | sort
 
       - name: Validate requested configuration
@@ -274,21 +257,8 @@ jobs:
           CONFIG_TARGET_econet_en751221=y
           CONFIG_TARGET_econet_en751221_DEVICE_en751221_generic=y
           CONFIG_TARGET_ROOTFS_INITRAMFS=y
-          CONFIG_SPI_AIROHA_SNFI=y
-          CONFIG_MTD_NAND_CORE=y
-          CONFIG_MTD_NAND_ECC=y
-          CONFIG_MTD_NAND_MTK_BMT=y
-          CONFIG_PCIEAER=y
-          CONFIG_PCIEPORTBUS=y
-          CONFIG_PCIE_MEDIATEK=y
-          CONFIG_PCI_DOMAINS=y
-          CONFIG_PCI_DOMAINS_GENERIC=y
-          CONFIG_PCI_DRIVERS_GENERIC=y
-          CONFIG_PCI_MSI=y
-          CONFIG_PHY_ECONET_PCIE=y
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-base=y
-          CONFIG_PACKAGE_luci-mod-admin-full=y
           CONFIG_PACKAGE_luci-mod-network=y
           CONFIG_PACKAGE_luci-mod-status=y
           CONFIG_PACKAGE_luci-mod-system=y
