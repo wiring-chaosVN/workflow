@@ -15,19 +15,35 @@ jobs:
           ref: main
           fetch-depth: 1
 
-      - name: Free runner disk space
+      - name: Record OpenWrt revision
+        shell: bash
         run: |
           set -eux
+
+          OPENWRT_REV="$(git rev-parse HEAD)"
+          echo "OPENWRT_REV=$OPENWRT_REV" >> "$GITHUB_ENV"
+
+          echo "OpenWrt revision: $OPENWRT_REV"
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -eux
+
           sudo rm -rf /usr/local/lib/android
           sudo rm -rf /usr/share/dotnet
           sudo rm -rf /opt/ghc
           sudo rm -rf /opt/hostedtoolcache
+
           df -h
 
       - name: Install build dependencies
+        shell: bash
         run: |
           set -eux
+
           sudo apt-get update
+
           sudo apt-get install -y \
             build-essential \
             clang \
@@ -51,9 +67,21 @@ jobs:
             curl \
             xsltproc
 
+      - name: Cache OpenWrt downloads and feeds
+        uses: actions/cache@v4
+        with:
+          path: |
+            dl
+            feeds
+          key: ${{ runner.os }}-openwrt-downloads-${{ env.OPENWRT_REV }}-${{ hashFiles('feeds.conf.default') }}
+          restore-keys: |
+            ${{ runner.os }}-openwrt-downloads-
+
       - name: Update and install OpenWrt feeds
+        shell: bash
         run: |
           set -eux
+
           ./scripts/feeds update -a
           ./scripts/feeds install -a
           ./scripts/feeds list
@@ -120,6 +148,7 @@ jobs:
           fi
 
           echo "EN751221 kernel PHY config:"
+
           grep -E \
             '^(CONFIG_PHYLIB|CONFIG_MEDIATEK_GE_PHY|CONFIG_MTK_NET_PHYLIB|CONFIG_MEDIATEK_GE_SOC_PHY|# CONFIG_MEDIATEK_GE_SOC_PHY)' \
             "$CONFIG" || true
@@ -145,6 +174,10 @@ jobs:
           CONFIG_PACKAGE_ethtool-full=y
           CONFIG_PACKAGE_pciutils=y
           CONFIG_PACKAGE_mdio-tools=y
+          CONFIG_PACKAGE_ip-full=y
+          CONFIG_PACKAGE_ip-bridge=y
+          CONFIG_PACKAGE_ip-legacy=y
+          CONFIG_PACKAGE_bridge=y
 
           CONFIG_PACKAGE_dnsmasq-full=y
           CONFIG_PACKAGE_firewall4=y
@@ -160,11 +193,14 @@ jobs:
           CONFIG_PACKAGE_wireguard-tools=y
           CONFIG_PACKAGE_luci-proto-wireguard=y
 
+          CONFIG_PACKAGE_kmod-mt76-core=y
+          CONFIG_PACKAGE_kmod-mt7615-common=y
           CONFIG_PACKAGE_kmod-mt7615e=y
           CONFIG_PACKAGE_kmod-mt7615-firmware=y
           CONFIG_PACKAGE_wpad-mbedtls=y
           CONFIG_PACKAGE_iw=y
           CONFIG_PACKAGE_iwinfo=y
+          CONFIG_PACKAGE_hostapd-utils=y
 
           CONFIG_PACKAGE_kmod-usb-core=y
           CONFIG_PACKAGE_kmod-usb2=y
@@ -184,6 +220,16 @@ jobs:
           CONFIG_PACKAGE_gpiod-tools=y
           CONFIG_PACKAGE_kmod-gpio-button-hotplug=y
           CONFIG_PACKAGE_kmod-leds-gpio=y
+
+          CONFIG_PACKAGE_kmod-nf-conntrack=y
+          CONFIG_PACKAGE_kmod-nf-conntrack6=y
+          CONFIG_PACKAGE_kmod-nf-nat=y
+          CONFIG_PACKAGE_kmod-nf-nat6=y
+          CONFIG_PACKAGE_kmod-nf-reject=y
+          CONFIG_PACKAGE_kmod-nf-reject6=y
+          CONFIG_PACKAGE_kmod-ipt-core=y
+
+          CONFIG_PACKAGE_kmod-tun=y
 
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-ssl-openssl=y
@@ -261,6 +307,10 @@ jobs:
           CONFIG_PACKAGE_socat=y
           CONFIG_PACKAGE_procps-ng=y
           CONFIG_PACKAGE_tree=y
+          CONFIG_PACKAGE_logrotate=y
+          CONFIG_PACKAGE_jq=y
+          CONFIG_PACKAGE_minicom=y
+          CONFIG_PACKAGE_gdbserver=y
           EOF
 
           make defconfig
@@ -279,6 +329,7 @@ jobs:
           CONFIG_TARGET_econet_en751221=y
           CONFIG_TARGET_econet_en751221_DEVICE_en751221_generic=y
           CONFIG_TARGET_ROOTFS_INITRAMFS=y
+
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-base=y
           CONFIG_PACKAGE_luci-mod-network=y
@@ -288,26 +339,64 @@ jobs:
           CONFIG_PACKAGE_luci-app-firewall=y
           CONFIG_PACKAGE_luci-app-package-manager=y
           CONFIG_PACKAGE_luci-app-uhttpd=y
+
           CONFIG_PACKAGE_uhttpd=y
           CONFIG_PACKAGE_uhttpd-mod-ubus=y
+          CONFIG_PACKAGE_uhttpd-mod-ucode=y
+
           CONFIG_PACKAGE_rpcd=y
           CONFIG_PACKAGE_rpcd-mod-luci=y
+          CONFIG_PACKAGE_rpcd-mod-ucode=y
+
+          CONFIG_PACKAGE_kmod-mt76-core=y
+          CONFIG_PACKAGE_kmod-mt7615-common=y
           CONFIG_PACKAGE_kmod-mt7615e=y
           CONFIG_PACKAGE_kmod-mt7615-firmware=y
+          CONFIG_PACKAGE_wpad-mbedtls=y
+          CONFIG_PACKAGE_iw=y
+          CONFIG_PACKAGE_iwinfo=y
+          CONFIG_PACKAGE_hostapd-utils=y
+
+          CONFIG_PACKAGE_ip-full=y
+          CONFIG_PACKAGE_ip-bridge=y
+          CONFIG_PACKAGE_ip-legacy=y
+          CONFIG_PACKAGE_bridge=y
+
+          CONFIG_PACKAGE_kmod-nf-conntrack=y
+          CONFIG_PACKAGE_kmod-nf-conntrack6=y
+          CONFIG_PACKAGE_kmod-nf-nat=y
+          CONFIG_PACKAGE_kmod-nf-nat6=y
+          CONFIG_PACKAGE_kmod-nf-reject=y
+          CONFIG_PACKAGE_kmod-nf-reject6=y
+          CONFIG_PACKAGE_kmod-ipt-core=y
+
           CONFIG_PACKAGE_kmod-usb2=y
           CONFIG_PACKAGE_kmod-usb3=y
           CONFIG_PACKAGE_kmod-usb-storage=y
+          CONFIG_PACKAGE_kmod-usb-storage-uas=y
+          CONFIG_PACKAGE_kmod-scsi-core=y
+          CONFIG_PACKAGE_usbutils=y
+
           CONFIG_PACKAGE_dnsmasq-full=y
           CONFIG_PACKAGE_firewall4=y
           CONFIG_PACKAGE_nftables-json=y
+
           CONFIG_PACKAGE_ppp=y
           CONFIG_PACKAGE_ppp-mod-pppoe=y
           CONFIG_PACKAGE_kmod-pppoe=y
+
           CONFIG_PACKAGE_kmod-wireguard=y
           CONFIG_PACKAGE_wireguard-tools=y
+
           CONFIG_PACKAGE_mtd=y
           CONFIG_PACKAGE_nand-utils=y
           CONFIG_PACKAGE_ubi-utils=y
+
+          CONFIG_PACKAGE_kmod-tun=y
+          CONFIG_PACKAGE_gdbserver=y
+          CONFIG_PACKAGE_jq=y
+          CONFIG_PACKAGE_minicom=y
+          CONFIG_PACKAGE_logrotate=y
           '
 
           FAILED=0
@@ -329,10 +418,19 @@ jobs:
 
           echo "All critical configuration options survived defconfig."
 
+      - name: Cache OpenWrt build tree
+        uses: actions/cache@v4
+        with:
+          path: |
+            build_dir
+            staging_dir
+          key: ${{ runner.os }}-openwrt-en751221-build-${{ env.OPENWRT_REV }}-${{ hashFiles('.config', 'target/linux/econet/**', 'target/linux/generic/**', 'package/**', 'feeds.conf.default', 'include/**', 'scripts/**') }}
+
       - name: Build OpenWrt
         shell: bash
         run: |
           set -eux
+
           make -j2 V=s
 
       - name: Verify built root filesystem
@@ -340,36 +438,78 @@ jobs:
         run: |
           set -eux
 
-          ROOTS=$(find build_dir staging_dir \
-            -type d \
-            \( -name 'root-*' -o -name 'root' \) \
-            2>/dev/null || true)
-
           ROOTFS=""
 
           while IFS= read -r candidate; do
             [ -z "$candidate" ] && continue
 
-            if [ -d "$candidate/usr/share/luci" ]; then
+            if [ -d "$candidate/etc" ] && [ -d "$candidate/www" ]; then
               ROOTFS="$candidate"
               break
             fi
-          done <<< "$ROOTS"
+          done < <(
+            find build_dir staging_dir \
+              -type d \
+              \( -name 'root-*' -o -name 'root' \) \
+              2>/dev/null \
+              | sort
+          )
 
           if [ -z "$ROOTFS" ]; then
-            echo "ERROR: LuCI directory not found."
+            echo "ERROR: OpenWrt target root filesystem was not found."
+
+            echo
+            echo "Candidate root directories:"
+            find build_dir staging_dir \
+              -type d \
+              \( -name 'root-*' -o -name 'root' \) \
+              -print \
+              2>/dev/null \
+              | sort || true
+
             exit 1
           fi
 
-          test -d "$ROOTFS/usr/share/luci"
+          echo "Target root filesystem:"
+          echo "$ROOTFS"
+
+          echo
+          echo "Root filesystem:"
+          ls -lah "$ROOTFS"
+
+          echo
+          echo "Checking LuCI runtime:"
+
+          test -d "$ROOTFS/usr/lib/lua/luci" \
+            || test -d "$ROOTFS/usr/share/ucode/luci"
+
           test -d "$ROOTFS/www"
+
+          echo
+          echo "Checking configuration:"
+
           test -e "$ROOTFS/etc/config/uhttpd"
           test -e "$ROOTFS/etc/config/firewall"
 
-          find "$ROOTFS/usr/share/luci" \
-            -maxdepth 2 \
-            -type f \
-            | head -100
+          echo
+          echo "LuCI runtime files:"
+
+          if [ -d "$ROOTFS/usr/lib/lua/luci" ]; then
+            find "$ROOTFS/usr/lib/lua/luci" \
+              -maxdepth 2 \
+              -type f \
+              | head -100
+          fi
+
+          if [ -d "$ROOTFS/usr/share/ucode/luci" ]; then
+            find "$ROOTFS/usr/share/ucode/luci" \
+              -maxdepth 2 \
+              -type f \
+              | head -100
+          fi
+
+          echo
+          echo "Web files:"
 
           find "$ROOTFS/www" \
             -maxdepth 3 \
@@ -377,20 +517,32 @@ jobs:
             | sort \
             | head -100
 
+          echo
+          echo "MT7615 / mt76 modules:"
+
           find "$ROOTFS/lib/modules" \
             -type f \
             | grep -E 'mt7615|mt76' \
             | sort || true
+
+          echo
+          echo "USB / storage modules:"
 
           find "$ROOTFS/lib/modules" \
             -type f \
             | grep -E 'usb|xhci|ehci|ohci|uas|scsi' \
             | sort || true
 
+          echo
+          echo "NAND / UBI tools:"
+
           find "$ROOTFS/usr" \
             -type f \
             | grep -E '/(nanddump|nandwrite|flash_erase|mtdinfo|ubinfo|ubiattach|ubidetach|ubiformat)$' \
             | sort || true
+
+          echo
+          echo "Root filesystem verification: OK"
 
       - name: Verify output
         shell: bash
@@ -426,6 +578,7 @@ jobs:
           set -eux
 
           OUT="bin/targets/econet/en751221"
+
           mkdir -p "$OUT/build-info"
 
           cp .config \
@@ -443,7 +596,7 @@ jobs:
           cat "$OUT/build-info/openwrt-revision.txt"
           cat "$OUT/build-info/build-time-utc.txt"
 
-      - name: Upload Build #2 FULL LUCI
+      - name: Upload Build
         uses: actions/upload-artifact@v4
         with:
           name: openwrt-en751221-build2-256m-full-luci
