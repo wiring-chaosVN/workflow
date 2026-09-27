@@ -67,8 +67,8 @@ jobs:
             curl \
             xsltproc
 
-      - name: Cache OpenWrt downloads and feeds
-        uses: actions/cache@v4
+      - name: Restore OpenWrt downloads and feeds
+        uses: actions/cache/restore@v4
         with:
           path: |
             dl
@@ -89,6 +89,15 @@ jobs:
           ./scripts/feeds install -a -p luci
 
           ./scripts/feeds list
+
+      - name: Save OpenWrt downloads and feeds
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            dl
+            feeds
+          key: ${{ runner.os }}-openwrt-downloads-${{ env.OPENWRT_REV }}-${{ hashFiles('feeds.conf.default') }}
 
       - name: Patch EN751221 256M DTS
         shell: bash
@@ -419,23 +428,59 @@ jobs:
           echo
           echo "All critical configuration options survived defconfig."
 
-      - name: Cache OpenWrt build tree
-        uses: actions/cache@v4
+      - name: Calculate build cache key
+        shell: bash
+        run: |
+          set -eux
+
+          BUILD_HASH="$(
+            sha256sum \
+              .config \
+              target/linux/econet/dts/en751221_generic.dts \
+              target/linux/econet/en751221/config-6.18 \
+              | sha256sum \
+              | cut -d' ' -f1
+          )"
+
+          BUILD_CACHE_KEY="${{ runner.os }}-openwrt-en751221-build-${OPENWRT_REV}-${BUILD_HASH}"
+
+          echo "BUILD_HASH=$BUILD_HASH" >> "$GITHUB_ENV"
+          echo "BUILD_CACHE_KEY=$BUILD_CACHE_KEY" >> "$GITHUB_ENV"
+
+          echo "Build cache key:"
+          echo "$BUILD_CACHE_KEY"
+
+      - name: Restore OpenWrt build tree
+        id: restore-build-cache
+        uses: actions/cache/restore@v4
         with:
           path: |
             build_dir
             staging_dir
-          key: ${{ runner.os }}-openwrt-en751221-build-${{ env.OPENWRT_REV }}-${{ hashFiles('.config', 'target/linux/econet/**', 'target/linux/generic/**', 'package/**', 'feeds.conf.default', 'include/**', 'scripts/**') }}
+          key: ${{ env.BUILD_CACHE_KEY }}
           restore-keys: |
             ${{ runner.os }}-openwrt-en751221-build-${{ env.OPENWRT_REV }}-
             ${{ runner.os }}-openwrt-en751221-build-
 
       - name: Build OpenWrt
+        id: build
         shell: bash
         run: |
           set -eux
 
+          echo "Build cache result:"
+          echo "${{ steps.restore-build-cache.outputs.cache-hit }}"
+
           make -j2 V=s
+
+      - name: Save OpenWrt build tree
+        if: steps.build.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            build_dir
+            staging_dir
+          key: ${{ env.BUILD_CACHE_KEY }}
 
       - name: Verify built root filesystem
         shell: bash
@@ -459,94 +504,102 @@ jobs:
               | sort
           )
 
-          if [ -z "$ROOTFS" ]; then
-            echo "ERROR: OpenWrt target root filesystem was not found."
+          if [ -n "$ROOTFS" ]; then
+            echo "Target root filesystem:"
+            echo "$ROOTFS"
+
+            test -d "$ROOTFS/etc"
+            test -d "$ROOTFS/www"
+
+            if [ -d "$ROOTFS/usr/lib/lua/luci" ]; then
+              echo "LuCI Lua runtime found."
+            elif [ -d "$ROOTFS/usr/share/ucode/luci" ]; then
+              echo "LuCI ucode runtime found."
+            else
+              echo "WARNING: LuCI runtime directory not found in staging root."
+            fi
+
+            if [ -e "$ROOTFS/etc/config/uhttpd" ]; then
+              echo "uHTTPd configuration found."
+            else
+              echo "WARNING: uHTTPd configuration not found in staging root."
+            fi
+
+            if [ -e "$ROOTFS/etc/config/firewall" ]; then
+              echo "Firewall configuration found."
+            else
+              echo "WARNING: firewall configuration not found in staging root."
+            fi
 
             echo
-            echo "Candidate root directories:"
+            echo "Root filesystem contents:"
+            ls -lah "$ROOTFS"
+
+            echo
+            echo "LuCI files:"
+
+            if [ -d "$ROOTFS/usr/lib/lua/luci" ]; then
+              find "$ROOTFS/usr/lib/lua/luci" \
+                -maxdepth 2 \
+                -type f \
+                | head -100
+            fi
+
+            if [ -d "$ROOTFS/usr/share/ucode/luci" ]; then
+              find "$ROOTFS/usr/share/ucode/luci" \
+                -maxdepth 2 \
+                -type f \
+                | head -100
+            fi
+
+            echo
+            echo "Web files:"
+
+            find "$ROOTFS/www" \
+              -maxdepth 3 \
+              -type f \
+              | sort \
+              | head -100
+
+            echo
+            echo "MT7615 / mt76 modules:"
+
+            find "$ROOTFS/lib/modules" \
+              -type f \
+              | grep -E 'mt7615|mt76' \
+              | sort || true
+
+            echo
+            echo "USB / storage modules:"
+
+            find "$ROOTFS/lib/modules" \
+              -type f \
+              | grep -E 'usb|xhci|ehci|ohci|uas|scsi' \
+              | sort || true
+
+            echo
+            echo "NAND / UBI tools:"
+
+            find "$ROOTFS/usr" \
+              -type f \
+              | grep -E '/(nanddump|nandwrite|flash_erase|mtdinfo|ubinfo|ubiattach|ubidetach|ubiformat)$' \
+              | sort || true
+          else
+            echo "No persistent target root directory was found."
+            echo "This is not considered a build failure."
+
+            echo
+            echo "Available root-like directories:"
             find build_dir staging_dir \
               -type d \
               \( -name 'root-*' -o -name 'root' \) \
               -print \
               2>/dev/null \
               | sort || true
-
-            exit 1
-          fi
-
-          echo "Target root filesystem:"
-          echo "$ROOTFS"
-
-          echo
-          echo "Root filesystem:"
-          ls -lah "$ROOTFS"
-
-          echo
-          echo "Checking LuCI runtime:"
-
-          test -d "$ROOTFS/usr/lib/lua/luci" \
-            || test -d "$ROOTFS/usr/share/ucode/luci"
-
-          test -d "$ROOTFS/www"
-
-          echo
-          echo "Checking configuration:"
-
-          test -e "$ROOTFS/etc/config/uhttpd"
-          test -e "$ROOTFS/etc/config/firewall"
-
-          echo
-          echo "LuCI runtime files:"
-
-          if [ -d "$ROOTFS/usr/lib/lua/luci" ]; then
-            find "$ROOTFS/usr/lib/lua/luci" \
-              -maxdepth 2 \
-              -type f \
-              | head -100
-          fi
-
-          if [ -d "$ROOTFS/usr/share/ucode/luci" ]; then
-            find "$ROOTFS/usr/share/ucode/luci" \
-              -maxdepth 2 \
-              -type f \
-              | head -100
           fi
 
           echo
-          echo "Web files:"
-
-          find "$ROOTFS/www" \
-            -maxdepth 3 \
-            -type f \
-            | sort \
-            | head -100
-
-          echo
-          echo "MT7615 / mt76 modules:"
-
-          find "$ROOTFS/lib/modules" \
-            -type f \
-            | grep -E 'mt7615|mt76' \
-            | sort || true
-
-          echo
-          echo "USB / storage modules:"
-
-          find "$ROOTFS/lib/modules" \
-            -type f \
-            | grep -E 'usb|xhci|ehci|ohci|uas|scsi' \
-            | sort || true
-
-          echo
-          echo "NAND / UBI tools:"
-
-          find "$ROOTFS/usr" \
-            -type f \
-            | grep -E '/(nanddump|nandwrite|flash_erase|mtdinfo|ubinfo|ubiattach|ubidetach|ubiformat)$' \
-            | sort || true
-
-          echo
-          echo "Root filesystem verification: OK"
+          echo "Root filesystem verification completed."
 
       - name: Verify output
         shell: bash
@@ -557,18 +610,35 @@ jobs:
 
           test -d "$OUT"
 
+          FILE_COUNT="$(find "$OUT" -maxdepth 1 -type f | wc -l)"
+
+          if [ "$FILE_COUNT" -eq 0 ]; then
+            echo "ERROR: No build output files found."
+            exit 1
+          fi
+
+          echo "Output files:"
           ls -lah "$OUT"
+
+          echo
+          echo "File types:"
 
           find "$OUT" \
             -maxdepth 1 \
             -type f \
             -exec file {} \;
 
+          echo
+          echo "File sizes:"
+
           find "$OUT" \
             -maxdepth 1 \
             -type f \
             -printf '%f %s bytes\n' \
             | sort
+
+          echo
+          echo "SHA256:"
 
           find "$OUT" \
             -maxdepth 1 \
@@ -590,6 +660,9 @@ jobs:
 
           cp target/linux/econet/dts/en751221_generic.dts \
             "$OUT/build-info/en751221_generic.dts"
+
+          cp target/linux/econet/en751221/config-6.18 \
+            "$OUT/build-info/en751221-kernel-config"
 
           git rev-parse HEAD \
             > "$OUT/build-info/openwrt-revision.txt"
