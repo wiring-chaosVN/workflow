@@ -90,6 +90,18 @@ jobs:
 
           ./scripts/feeds list
 
+          FEEDS_REV_HASH="$(
+            {
+              git -C feeds/packages rev-parse HEAD
+              git -C feeds/luci rev-parse HEAD
+            } | sha256sum | cut -d' ' -f1
+          )"
+
+          echo "FEEDS_REV_HASH=$FEEDS_REV_HASH" >> "$GITHUB_ENV"
+
+          echo "Feeds revision hash:"
+          echo "$FEEDS_REV_HASH"
+
       - name: Save OpenWrt downloads and feeds
         if: always()
         uses: actions/cache/save@v4
@@ -161,15 +173,88 @@ jobs:
             printf '%s\n' '# CONFIG_MEDIATEK_GE_SOC_PHY is not set' >> "$CONFIG"
           fi
 
-          echo "EN751221 kernel PHY config:"
+          if ! grep -qxF 'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' "$CONFIG"; then
+            echo 'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' >> "$CONFIG"
+          fi
+
+          echo "EN751221 kernel PHY/zboot config:"
 
           grep -E \
-            '^(CONFIG_PHYLIB|CONFIG_MEDIATEK_GE_PHY|CONFIG_MTK_NET_PHYLIB|CONFIG_MEDIATEK_GE_SOC_PHY|# CONFIG_MEDIATEK_GE_SOC_PHY)' \
+            '^(CONFIG_PHYLIB|CONFIG_MEDIATEK_GE_PHY|CONFIG_MTK_NET_PHYLIB|CONFIG_MEDIATEK_GE_SOC_PHY|# CONFIG_MEDIATEK_GE_SOC_PHY|CONFIG_ZBOOT_LOAD_ADDRESS)' \
             "$CONFIG" || true
 
           echo
           echo "Full target kernel config:"
           cat "$CONFIG"
+
+      # IMPORTANT:
+      #
+      # The EcoNet bootloader loads the zboot wrapper at 0x80020000.
+      #
+      # CONFIG_ZBOOT_LOAD_ADDRESS MUST STAY 0x80020000.
+      #
+      # The Linux kernel itself must be linked/loaded much higher so that
+      # decompressed kernel output does not overwrite the zboot heap/stack.
+      #
+      # Linux arch/mips/econet/Platform controls the kernel load/link address.
+      #
+      # OLD:
+      #   0xffffffff81000000
+      #
+      # NEW:
+      #   0xffffffff85000000
+      #
+      # This is intentionally NOT the address where the bootloader jumps.
+      - name: Add EN751221 zboot kernel placement patch
+        shell: bash
+        run: |
+          set -eux
+
+          PATCH_DIR="target/linux/econet/patches-6.18"
+          PATCH_FILE="$PATCH_DIR/999-en751221-zboot-kernel-load-address.patch"
+
+          mkdir -p "$PATCH_DIR"
+
+          cat > "$PATCH_FILE" <<'PATCH'
+          From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+          From: wiring-chaosVN <wiring-chaosVN@users.noreply.github.com>
+          Date: Wed, 28 Sep 2026 00:00:00 +0700
+          Subject: [PATCH] mips: econet: move EN751221 zboot kernel load address
+
+          The EN751221 bootloader loads the zboot wrapper at 0x80020000.
+
+          The default EcoNet kernel load address of 0x81000000 is too close
+          to the zboot decompressor heap for large initramfs kernels. The
+          decompressed kernel overwrites zboot temporary memory and the
+          decompressor crashes.
+
+          Keep the zboot wrapper at 0x80020000 through
+          CONFIG_ZBOOT_LOAD_ADDRESS, while moving the Linux kernel load/link
+          address to 0x85000000.
+
+          Signed-off-by: wiring-chaosVN <wiring-chaosVN@users.noreply.github.com>
+          ---
+           arch/mips/econet/Platform | 2 +-
+           1 file changed, 1 insertion(+), 1 deletion(-)
+
+          diff --git a/arch/mips/econet/Platform b/arch/mips/econet/Platform
+          index 0000000..0000000 100644
+          --- a/arch/mips/econet/Platform
+          +++ b/arch/mips/econet/Platform
+          @@ -1,3 +1,3 @@
+           # To address a 7.2MB kernel size limit in the EcoNet SDK bootloader,
+           # we put the load address well above where the bootloader loads and then use zboot. So please set CONFIG_ZBOOT_LOAD_ADDRESS to the address where your bootloader actually places the kernel.
+          -load-$(CONFIG_ECONET)	+= 0xffffffff81000000
+          +load-$(CONFIG_ECONET)	+= 0xffffffff85000000
+          PATCH
+
+          echo
+          echo "Created zboot placement patch:"
+          cat "$PATCH_FILE"
+
+          test -f "$PATCH_FILE"
+          grep -q '0xffffffff85000000' "$PATCH_FILE"
+          ! grep -q '^[[:space:]-]*load-\$(CONFIG_ECONET).*0xffffffff81000000' "$PATCH_FILE"
 
       - name: Configure EN751221 FULL image
         shell: bash
@@ -341,6 +426,8 @@ jobs:
           CONFIG_TARGET_econet_en751221_DEVICE_en751221_generic=y
           CONFIG_TARGET_ROOTFS_INITRAMFS=y
 
+          CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000
+
           CONFIG_PACKAGE_luci=y
           CONFIG_PACKAGE_luci-base=y
           CONFIG_PACKAGE_luci-mod-network=y
@@ -436,13 +523,15 @@ jobs:
           BUILD_HASH="$(
             sha256sum \
               .config \
+              feeds.conf.default \
               target/linux/econet/dts/en751221_generic.dts \
               target/linux/econet/en751221/config-6.18 \
+              target/linux/econet/patches-6.18/999-en751221-zboot-kernel-load-address.patch \
               | sha256sum \
               | cut -d' ' -f1
           )"
 
-          BUILD_CACHE_KEY="${{ runner.os }}-openwrt-en751221-build-${OPENWRT_REV}-${BUILD_HASH}"
+          BUILD_CACHE_KEY="${{ runner.os }}-openwrt-en751221-build-${OPENWRT_REV}-${FEEDS_REV_HASH}-${BUILD_HASH}"
 
           echo "BUILD_HASH=$BUILD_HASH" >> "$GITHUB_ENV"
           echo "BUILD_CACHE_KEY=$BUILD_CACHE_KEY" >> "$GITHUB_ENV"
@@ -459,8 +548,68 @@ jobs:
             staging_dir
           key: ${{ env.BUILD_CACHE_KEY }}
           restore-keys: |
-            ${{ runner.os }}-openwrt-en751221-build-${{ env.OPENWRT_REV }}-
+            ${{ runner.os }}-openwrt-en751221-build-${{ env.OPENWRT_REV }}-${{ env.FEEDS_REV_HASH }}-
             ${{ runner.os }}-openwrt-en751221-build-
+
+      - name: Prepare and verify EN751221 zboot placement
+        shell: bash
+        run: |
+          set -eux
+
+          echo "Build cache result:"
+          echo "${{ steps.restore-build-cache.outputs.cache-hit }}"
+
+          # Ensure the Linux source tree exists and OpenWrt applies all
+          # target patches, including our EN751221 zboot patch.
+          make target/linux/prepare V=s
+
+          PLATFORM_FILE="$(
+            find build_dir \
+              -type f \
+              -path '*/arch/mips/econet/Platform' \
+              -print \
+              | head -n 1
+          )"
+
+          if [ -z "$PLATFORM_FILE" ]; then
+            echo "ERROR: Could not locate arch/mips/econet/Platform"
+            find build_dir \
+              -type f \
+              -path '*/arch/mips/*/Platform' \
+              -print \
+              | sort || true
+            exit 1
+          fi
+
+          echo
+          echo "EN751221 Platform file:"
+          echo "$PLATFORM_FILE"
+
+          echo
+          cat "$PLATFORM_FILE"
+
+          echo
+          echo "Checking expected zboot kernel load address..."
+
+          grep -q \
+            'load-\$(CONFIG_ECONET)[[:space:]]*+=[[:space:]]*0xffffffff85000000' \
+            "$PLATFORM_FILE"
+
+          if grep -q \
+            'load-\$(CONFIG_ECONET)[[:space:]]*+=[[:space:]]*0xffffffff81000000' \
+            "$PLATFORM_FILE"; then
+            echo "ERROR: old 0x81000000 load address is still present."
+            exit 1
+          fi
+
+          grep -qxF \
+            'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' \
+            target/linux/econet/en751221/config-6.18
+
+          echo
+          echo "Verified:"
+          echo "  zboot wrapper load/jump address = 0x80020000"
+          echo "  Linux kernel load/link address = 0x85000000"
 
       - name: Build OpenWrt
         id: build
@@ -473,6 +622,9 @@ jobs:
 
           make -j2 V=s
 
+      # IMPORTANT:
+      # Save immediately after successful compilation and BEFORE any
+      # verifier/output step that can fail.
       - name: Save OpenWrt build tree
         if: steps.build.outcome == 'success'
         uses: actions/cache/save@v4
@@ -664,19 +816,26 @@ jobs:
           cp target/linux/econet/en751221/config-6.18 \
             "$OUT/build-info/en751221-kernel-config"
 
+          cp target/linux/econet/patches-6.18/999-en751221-zboot-kernel-load-address.patch \
+            "$OUT/build-info/en751221-zboot-load-address.patch"
+
           git rev-parse HEAD \
             > "$OUT/build-info/openwrt-revision.txt"
+
+          printf '%s\n' "$FEEDS_REV_HASH" \
+            > "$OUT/build-info/feeds-revision-hash.txt"
 
           date -u \
             > "$OUT/build-info/build-time-utc.txt"
 
           cat "$OUT/build-info/openwrt-revision.txt"
+          cat "$OUT/build-info/feeds-revision-hash.txt"
           cat "$OUT/build-info/build-time-utc.txt"
 
       - name: Upload Build
         uses: actions/upload-artifact@v4
         with:
-          name: openwrt-en751221-build2-256m-full-luci
+          name: openwrt-en751221-build3-256m-full-luci-zboot850
           path: bin/targets/econet/en751221/
           if-no-files-found: error
           retention-days: 7
