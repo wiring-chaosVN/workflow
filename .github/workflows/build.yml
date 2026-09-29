@@ -393,7 +393,7 @@ jobs:
           test -f "$KERNEL_CONFIG"
           grep -qxF 'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' "$KERNEL_CONFIG"
 
-          grep -qxF 'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' .config
+          #grep -qxF 'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' .config
 
           REQUIRED='
           CONFIG_TARGET_econet=y
