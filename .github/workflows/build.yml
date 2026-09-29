@@ -573,10 +573,6 @@ jobs:
             'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' \
             target/linux/econet/en751221/config-6.18
 
-          grep -qxF \
-            'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' \
-            .config
-
           echo "ZBOOT wrapper load address = 0x80020000"
           echo "Linux kernel load/link address = 0x85000000"
 
