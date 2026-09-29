@@ -222,7 +222,7 @@ jobs:
 
           test -s "$PATCH_FILE"
 
-          grep -Fq '--- a/arch/mips/econet/Platform' "$PATCH_FILE"
+          grep -Fq -- '--- a/arch/mips/econet/Platform' "$PATCH_FILE"
           grep -Fq '+++ b/arch/mips/econet/Platform' "$PATCH_FILE"
           grep -Fq '0xffffffff81000000' "$PATCH_FILE"
           grep -Fq '0xffffffff85000000' "$PATCH_FILE"
