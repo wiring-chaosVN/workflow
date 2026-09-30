@@ -816,7 +816,7 @@ jobs:
           CONFIG_PACKAGE_kmod-mt7615-common=y
           CONFIG_PACKAGE_kmod-mt7615e=y
           CONFIG_PACKAGE_kmod-mt7615-firmware=y
-          CONFIG_PACKAGE_wpad-mbedtls=y
+          CONFIG_PACKAGE_wpad-basic-mbedtls=y
           CONFIG_PACKAGE_iw=y
           CONFIG_PACKAGE_iwinfo=y
           CONFIG_PACKAGE_hostapd-utils=y
@@ -950,7 +950,7 @@ jobs:
               sha256sum files/usr/lib/opennds/ac1000hi-token.sh
               sha256sum files/etc/config/opennds
               sha256sum files/etc/crontabs/root
-              printf '%s\n' 'AC1000HI_RELEASE_STACK=v1-20260930-nand-opennds-accessctl'
+              printf '%s\n' 'AC1000HI_RELEASE_STACK=v2-20260930-hostapd-basic-mbedtls'
               printf '%s\n' 'EN751221_ZBOOT_KERNEL_LOAD=0x85000000'
             } | sha256sum | cut -d' ' -f1
           )"
