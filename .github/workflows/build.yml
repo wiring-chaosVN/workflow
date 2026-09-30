@@ -446,7 +446,7 @@ jobs:
           0 * * * * /usr/sbin/accessctl gc >/dev/null 2>&1
           EOF
 
-          cat > files/usr/sbin/accessctl <<'EOF'
+          cat > files/usr/sbin/accessctl <<'ACCESSCTL_EOF'
           #!/bin/sh
           set -eu
           umask 077
@@ -668,7 +668,7 @@ jobs:
               gc) gc ;;
               *) usage >&2; exit 2 ;;
           esac
-          EOF
+          ACCESSCTL_EOF
 
           cat > files/usr/lib/opennds/ac1000hi-token.sh <<'EOF'
           #!/bin/sh
