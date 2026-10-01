@@ -984,24 +984,6 @@ jobs:
 
           make defconfig
 
-          echo "=== Final kernel config ==="
-
-          KERNEL_CONFIG="$(
-            find build_dir/target-*/linux-econet_en751221/linux-*/ \
-              -maxdepth 1 \
-              -name .config \
-              -type f \
-              -print \
-              | head -n 1
-          )"
-
-          test -n "$KERNEL_CONFIG"
-          test -f "$KERNEL_CONFIG"
-
-          grep -qxF 'CONFIG_MTD_SPLIT_TCLINUX_FW=y' "$KERNEL_CONFIG"
-          grep -qxF 'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' "$KERNEL_CONFIG"
-
-          echo "Kernel config: $KERNEL_CONFIG"
 
           grep -qxF 'CONFIG_PACKAGE_opennds=y' .config
           grep -qxF 'CONFIG_MTD_SPLIT_TCLINUX_FW=y' target/linux/econet/en751221/config-6.18
@@ -1028,7 +1010,7 @@ jobs:
               sha256sum files/usr/lib/opennds/ac1000hi-token.sh
               sha256sum files/etc/config/opennds
               sha256sum files/etc/crontabs/root
-                            printf '%s\n' 'AC1000HI_RELEASE_STACK=v3-20261001-nand-layout-verified'
+              printf '%s\n' 'AC1000HI_RELEASE_STACK=v3-20261001-nand-layout-verified'
               printf '%s\n' 'EN751221_ZBOOT_KERNEL_LOAD=0x85000000'
               printf '%s\n' 'AC1000HI_NAND_SIZE=0x08000000'
               printf '%s\n' 'AC1000HI_NAND_ERASEBLOCK=0x20000'
@@ -1056,6 +1038,29 @@ jobs:
         run: |
           set -eux
           make target/linux/prepare V=s
+
+
+
+          echo "=== Final kernel config ==="
+
+          KERNEL_CONFIG="$(
+            find build_dir/target-*/linux-econet_en751221/linux-*/ \
+              -maxdepth 1 \
+              -name .config \
+              -type f \
+              -print \
+              | head -n 1
+          )"
+
+          test -n "$KERNEL_CONFIG"
+          test -f "$KERNEL_CONFIG"
+
+          grep -qxF 'CONFIG_MTD_SPLIT_TCLINUX_FW=y' "$KERNEL_CONFIG"
+          grep -qxF 'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' "$KERNEL_CONFIG"
+
+          echo "Kernel config: $KERNEL_CONFIG"
+
+
 
           PLATFORM_FILE="$(find build_dir -type f -path '*/arch/mips/econet/Platform' -print | head -n 1)"
           test -n "$PLATFORM_FILE"
