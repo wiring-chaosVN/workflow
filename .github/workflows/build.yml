@@ -91,7 +91,7 @@ jobs:
           echo "Feeds revision hash: $FEEDS_REV_HASH"
 
       - name: Save OpenWrt downloads and feeds
-        if: always()
+        if: success()
         uses: actions/cache/save@v4
         with:
           path: |
@@ -305,6 +305,7 @@ jobs:
           #include <linux/slab.h>
           #include <linux/mtd/mtd.h>
           #include <linux/mtd/partitions.h>
+          #include <linux/byteorder/generic.h>
           #include <linux/of.h>
           
           #include "mtdsplit.h"
@@ -987,6 +988,26 @@ jobs:
           grep -qxF 'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' target/linux/econet/en751221/config-6.18
           test -f target/linux/generic/files/drivers/mtd/mtdsplit/mtdsplit_tclinux.c
 
+          echo "=== Final kernel config ==="
+
+          KERNEL_CONFIG="$(
+            find build_dir/target-*/linux-econet_en751221/linux-*/ \
+              -maxdepth 1 \
+              -name .config \
+              -type f \
+              -print \
+              | head -n 1
+          )"
+
+          test -n "$KERNEL_CONFIG"
+          test -f "$KERNEL_CONFIG"
+
+          grep -qxF 'CONFIG_MTD_SPLIT_TCLINUX_FW=y' "$KERNEL_CONFIG"
+          grep -qxF 'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' "$KERNEL_CONFIG"
+
+          echo "Kernel config: $KERNEL_CONFIG"
+
+
       - name: Calculate build cache key
         shell: bash
         run: |
@@ -1242,6 +1263,69 @@ jobs:
             "flash 80000 80020000 $LEN_HEX" \
             "go" \
             > "$OUT/nand-flash.txt"
+
+          echo
+          echo "=== Validate tclinux header ==="
+
+          python3 - "$IMG" <<'PY'
+          import struct
+          import sys
+
+          img = sys.argv[1]
+
+          with open(img, "rb") as f:
+              hdr = f.read(0x100)
+
+          if len(hdr) != 0x100:
+              raise SystemExit("ERROR: tclinux header is shorter than 0x100 bytes")
+
+          if hdr[0:4] != b"2RDH":
+              raise SystemExit(
+                  f"ERROR: invalid tclinux magic: {hdr[0:4]!r}"
+              )
+
+          hdrlen = struct.unpack(">I", hdr[0x04:0x08])[0]
+          total_len = struct.unpack(">I", hdr[0x08:0x0c])[0]
+          kernel_len = struct.unpack(">I", hdr[0x30:0x34])[0]
+          rootfs_len = struct.unpack(">I", hdr[0x34:0x38])[0]
+          romfile_len = struct.unpack(">I", hdr[0x38:0x3c])[0]
+          loadaddr = struct.unpack(">I", hdr[0x5c:0x60])[0]
+
+          print(f"magic       = {hdr[0:4].decode()}")
+          print(f"hdrlen      = 0x{hdrlen:x}")
+          print(f"total_len   = 0x{total_len:x}")
+          print(f"kernel_len  = 0x{kernel_len:x}")
+          print(f"rootfs_len  = 0x{rootfs_len:x}")
+          print(f"romfile_len = 0x{romfile_len:x}")
+          print(f"loadaddr    = 0x{loadaddr:08x}")
+
+          if hdrlen != 0x100:
+              raise SystemExit("ERROR: invalid tclinux header length")
+
+          if kernel_len == 0:
+              raise SystemExit("ERROR: kernel_len is zero")
+
+          if rootfs_len == 0:
+              raise SystemExit("ERROR: rootfs_len is zero")
+
+          if total_len > 0x01e00000:
+              raise SystemExit("ERROR: total_len exceeds tclinux partition")
+
+          if 0x100 + kernel_len + rootfs_len > total_len:
+              raise SystemExit(
+                  "ERROR: kernel/rootfs lengths exceed total_len"
+              )
+
+          if loadaddr != 0x80020000:
+              raise SystemExit(
+                  f"ERROR: unexpected boot decompression address: 0x{loadaddr:08x}"
+              )
+
+          print("tclinux header validation: OK")
+          PY
+
+          echo
+          echo "=== SHA256 ==="
 
           echo
           echo "=== SHA256 ==="
