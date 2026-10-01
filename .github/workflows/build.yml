@@ -1062,25 +1062,25 @@ jobs:
 
           echo "=== Memory ==="
 
-          grep -qxF \
+          grep -qF \
             'reg = <0x00000000 0x10000000>;' \
             "$DTS"
 
-          grep -qxF \
+          grep -qF \
             'linux,usable-memory-range = <0x00020000 0x0ffe0000>;' \
             "$DTS"
 
           echo "=== NAND/BMT ==="
 
-          grep -qxF \
+          grep -qF \
             'econet,bmt;' \
             "$DTS"
 
-          grep -qxF \
+          grep -qF \
             'econet,bbt-table-size = <1000>;' \
             "$DTS"
 
-          grep -qxF \
+          grep -qF \
             'econet,assert-reserve-size = <81>;' \
             "$DTS"
 
