@@ -846,6 +846,7 @@ jobs:
           CONFIG_TARGET_econet_en751221=y
           CONFIG_TARGET_econet_en751221_DEVICE_en751221_generic=y
           CONFIG_TARGET_ROOTFS_INITRAMFS=y
+          CONFIG_KERNEL_MEDIATEK_GE_SOC_PHY=n
 
           CONFIG_PACKAGE_base-files=y
           CONFIG_PACKAGE_netifd=y
