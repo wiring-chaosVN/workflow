@@ -1330,8 +1330,6 @@ jobs:
           print("tclinux header validation: OK")
           PY
 
-          echo
-          echo "=== SHA256 ==="
 
           echo
           echo "=== SHA256 ==="
