@@ -983,10 +983,6 @@ jobs:
           EOF
 
           make defconfig
-          grep -qxF 'CONFIG_PACKAGE_opennds=y' .config
-          grep -qxF 'CONFIG_MTD_SPLIT_TCLINUX_FW=y' target/linux/econet/en751221/config-6.18
-          grep -qxF 'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' target/linux/econet/en751221/config-6.18
-          test -f target/linux/generic/files/drivers/mtd/mtdsplit/mtdsplit_tclinux.c
 
           echo "=== Final kernel config ==="
 
@@ -1007,6 +1003,11 @@ jobs:
 
           echo "Kernel config: $KERNEL_CONFIG"
 
+          grep -qxF 'CONFIG_PACKAGE_opennds=y' .config
+          grep -qxF 'CONFIG_MTD_SPLIT_TCLINUX_FW=y' target/linux/econet/en751221/config-6.18
+          grep -qxF 'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' target/linux/econet/en751221/config-6.18
+          test -f target/linux/generic/files/drivers/mtd/mtdsplit/mtdsplit_tclinux.c
+ 
 
       - name: Calculate build cache key
         shell: bash
