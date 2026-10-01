@@ -1252,7 +1252,7 @@ jobs:
           echo "Partition limit:  $LIMIT bytes"
 
           test "$SIZE" -gt 0
-          test "$SIZE" -lt "$LIMIT"
+          test "$SIZE" -le "$LIMIT"
 
           LEN_HEX="$(printf '%X' "$SIZE")"
 
