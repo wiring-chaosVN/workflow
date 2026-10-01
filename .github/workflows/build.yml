@@ -467,7 +467,7 @@ jobs:
             DEVICE_DESCRIPTION := OpenWrt NAND/TRX image for EcoNet EN751221 AC1000HI
             DEVICE_DTS := en751221_generic
             KERNEL_INITRAMFS := kernel-bin | append-dtb
-            IMAGES := tclinux.trx initramfs-kernel.bin
+            IMAGES := tclinux.trx
             IMAGE/tclinux.trx := append-kernel | lzma | tclinux-trx
           endef
           TARGET_DEVICES += en751221_generic
@@ -1039,11 +1039,14 @@ jobs:
         run: |
           set -eux
 
+          echo "=== Build tools and toolchain ==="
+          make -j$(($(nproc)+1)) tools/install toolchain/install
+
           echo "=== Prepare kernel source ==="
           make target/linux/prepare V=s
 
           echo "=== Generate kernel config ==="
-          make kernel_oldconfig V=s
+          yes "" | make kernel_oldconfig V=s || true
 
           echo "=== Final kernel config ==="
 
@@ -1154,7 +1157,7 @@ jobs:
           echo "=== image recipe ==="
 
           grep -q \
-            'IMAGES := tclinux.trx initramfs-kernel.bin' \
+            'IMAGES := tclinux.trx' \
             "$IMAGE_MK"
 
           grep -q \
@@ -1169,7 +1172,7 @@ jobs:
         shell: bash
         run: |
           set -eux
-          make -j2 V=s
+          make -j$(($(nproc)+1)) V=s
 
       - name: Save OpenWrt build tree
         if: steps.build.outcome == 'success'
@@ -1295,10 +1298,10 @@ jobs:
 
           hdrlen = struct.unpack(">I", hdr[0x04:0x08])[0]
           total_len = struct.unpack(">I", hdr[0x08:0x0c])[0]
-          kernel_len = struct.unpack(">I", hdr[0x30:0x34])[0]
-          rootfs_len = struct.unpack(">I", hdr[0x34:0x38])[0]
-          romfile_len = struct.unpack(">I", hdr[0x38:0x3c])[0]
-          loadaddr = struct.unpack(">I", hdr[0x5c:0x60])[0]
+          kernel_len = struct.unpack(">I", hdr[0x50:0x54])[0]
+          rootfs_len = struct.unpack(">I", hdr[0x54:0x58])[0]
+          romfile_len = struct.unpack(">I", hdr[0x58:0x5c])[0]
+          loadaddr = struct.unpack(">I", hdr[0x7c:0x80])[0]
 
           print(f"magic       = {hdr[0:4].decode()}")
           print(f"hdrlen      = 0x{hdrlen:x}")
@@ -1348,7 +1351,7 @@ jobs:
           INITRAMFS="$(
             find bin/targets \
               -type f \
-              -name 'initramfs-kernel.bin' \
+              -name '*initramfs-kernel.bin' \
               -print |
               sort |
               head -n 1
