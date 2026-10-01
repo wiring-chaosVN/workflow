@@ -1043,7 +1043,7 @@ jobs:
 
           echo "=== Final kernel config ==="
 
-          KERNEL_CONFIG="$(
+                    KERNEL_CONFIG="$(
             find build_dir/target-*/linux-econet_en751221/linux-*/ \
               -maxdepth 1 \
               -name .config \
