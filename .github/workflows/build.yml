@@ -1037,19 +1037,22 @@ jobs:
         shell: bash
         run: |
           set -eux
+
+          echo "=== Prepare kernel source ==="
           make target/linux/prepare V=s
 
-
+          echo "=== Generate kernel config ==="
+          make target/linux/oldconfig V=s
 
           echo "=== Final kernel config ==="
 
-                    KERNEL_CONFIG="$(
+          KERNEL_CONFIG="$(
             find build_dir/target-*/linux-econet_en751221/linux-*/ \
               -maxdepth 1 \
               -name .config \
               -type f \
-              -print \
-              | head -n 1
+              -print |
+              head -n 1
           )"
 
           test -n "$KERNEL_CONFIG"
@@ -1060,12 +1063,11 @@ jobs:
 
           echo "Kernel config: $KERNEL_CONFIG"
 
-
-
           PLATFORM_FILE="$(find build_dir -type f -path '*/arch/mips/econet/Platform' -print | head -n 1)"
           test -n "$PLATFORM_FILE"
           grep -Fq 'load-$(CONFIG_ECONET)' "$PLATFORM_FILE"
           grep -Fq '0xffffffff85000000' "$PLATFORM_FILE"
+
           if grep -Fq '0xffffffff81000000' "$PLATFORM_FILE"; then
             echo "ERROR: old 0x81000000 load address is still present."
             exit 1
