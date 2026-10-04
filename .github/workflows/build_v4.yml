@@ -1117,7 +1117,6 @@ jobs:
           CONFIG_PACKAGE_kmod-nf-nat6=y
           CONFIG_PACKAGE_kmod-nf-reject=y
           CONFIG_PACKAGE_kmod-nf-reject6=y
-          CONFIG_PACKAGE_kmod-ipt-core=y
           CONFIG_PACKAGE_kmod-tun=y
 
           CONFIG_PACKAGE_luci=y
@@ -1200,6 +1199,14 @@ jobs:
           make defconfig
 
 
+          # Linux 6.18: kmod-iptables and kmod-nf-ipt both ship ip_tables.ko/x_tables.ko,
+          # so selecting kmod-ipt-core (iptables-legacy) breaks rootfs install with
+          # check_data_file_clashes. This image uses nftables/firewall4 only.
+          if grep -Eq '^CONFIG_PACKAGE_(kmod-ipt-core|kmod-nf-ipt|kmod-iptables)=[ym]' .config; then
+            echo 'ERROR: legacy iptables kmods selected; they clash on kernel 6.18'
+            grep -E '^CONFIG_PACKAGE_(kmod-ipt-core|kmod-nf-ipt|kmod-iptables)=' .config
+            exit 1
+          fi
           grep -qxF 'CONFIG_PACKAGE_opennds=y' .config
           grep -qxF 'CONFIG_PACKAGE_opkg=y' .config
           grep -qxF '# CONFIG_USE_APK is not set' .config
