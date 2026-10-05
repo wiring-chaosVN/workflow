@@ -23,6 +23,11 @@ jobs:
           echo "OPENWRT_REV=$OPENWRT_REV" >> "$GITHUB_ENV"
           echo "OpenWrt revision: $OPENWRT_REV"
 
+      - name: Checkout CI repo (local patches)
+        uses: actions/checkout@v4
+        with:
+          path: ci
+
       - name: Free runner disk space
         shell: bash
         run: |
@@ -99,6 +104,68 @@ jobs:
             feeds
           key: ${{ runner.os }}-openwrt-downloads-${{ env.OPENWRT_REV }}-${{ hashFiles('feeds.conf.default') }}
 
+
+      - name: Use DSA-capable EN751221 econet_eth driver
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cat > package/kernel/econet-eth/Makefile <<'EOF'
+          include $(TOPDIR)/rules.mk
+
+          PKG_NAME:=econet-eth
+          PKG_RELEASE:=2
+
+          PKG_SOURCE_PROTO:=git
+          PKG_SOURCE_URL:=https://github.com/cjdelisle/econet_eth.git
+          PKG_SOURCE_DATE:=2026-09-21
+          PKG_SOURCE_VERSION:=df20a0548c9142ef80ee613a81da90885b57e6c5
+
+          include $(INCLUDE_DIR)/kernel.mk
+          include $(INCLUDE_DIR)/package.mk
+
+          define KernelPackage/econet-eth
+            SUBMENU:=Network Devices
+            TITLE:=EcoNet EN751221 Ethernet + MT7530 DSA Driver
+            DEPENDS:=@TARGET_econet +kmod-dsa
+            FILES:=$(PKG_BUILD_DIR)/econet-eth.ko \\
+                   $(PKG_BUILD_DIR)/mt7530.ko \\
+                   $(PKG_BUILD_DIR)/mt7530-mdio.ko \\
+                   $(PKG_BUILD_DIR)/mt7530-mmio.ko
+            AUTOLOAD:=$(call AutoLoad,90,econet-eth mt7530 mt7530-mdio mt7530-mmio)
+          endef
+
+          define KernelPackage/econet-eth/description
+            EcoNet EN751221 Ethernet driver with the MT7530 DSA and cascaded-MCM switch drivers.
+          endef
+
+          define Build/Prepare
+            $(call Build/Prepare/Default)
+          endef
+
+          define Build/Compile
+            $(KERNEL_MAKE) M=$(PKG_BUILD_DIR) modules
+          endef
+
+          $(eval $(call KernelPackage,econet-eth))
+          EOF
+          grep -q 'PKG_SOURCE_VERSION:=df20a0548c9142ef80ee613a81da90885b57e6c5' package/kernel/econet-eth/Makefile
+          grep -q 'mt7530-mmio.ko' package/kernel/econet-eth/Makefile
+
+      - name: Apply local econet-eth patches (extra)
+        shell: bash
+        run: |
+          set -eux
+          shopt -s nullglob
+          patches=(ci/patches/*.patch)
+          if [ "${#patches[@]}" -eq 0 ]; then
+            echo "No local patches in ci/patches, skipping"
+            exit 0
+          fi
+          # econet-eth is an out-of-tree module fetched from git; patches in
+          # package/kernel/econet-eth/patches are applied on top of the source.
+          test -d package/kernel/econet-eth
+          mkdir -p package/kernel/econet-eth/patches
+          cp -v "${patches[@]}" package/kernel/econet-eth/patches/
       - name: Patch EN751221 256M DTS and PCIe
         shell: bash
         run: |
@@ -256,6 +323,160 @@ jobs:
 
           echo "EN751221 DTS validation: OK"
 
+      - name: Enable EN751221 MT7530 DSA cascade
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          DTS="target/linux/econet/dts/en751221_generic.dts"
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("target/linux/econet/dts/en751221_generic.dts")
+          s = p.read_text()
+
+          # The DSA conduit must stop before the integrated MT7530 register
+          # window; otherwise econet_eth also owns the switch registers.
+          s = s.replace(
+              "reg = <0x1fb50000 0x10000>;",
+              "reg = <0x1fb50000 0x8000>;",
+              1,
+          )
+
+          # Replace the old MDIO switch description inside ethernet@1fb50000.
+          s, n = re.subn(
+              r'\n\t\t mdio: mdio-bus \{.*?\n\t\};\n\n\tpciecfg:',
+              '\n\t};\n\n\tswitch: switch@1fb58000 {\n'
+              '    compatible = "econet,en751221-switch";\n'
+              '    reg = <0x1fb58000 0x8000>;\n'
+              '    resets = <&scuclk EN751221_GSW_RST>;\n'
+              '    status = "okay";\n'
+              '    dsa,member = <0 0>;\n\n'
+              '    ports {\n'
+              '        #address-cells = <1>;\n'
+              '        #size-cells = <0>;\n\n'
+              '        ondie_port5: port@5 {\n'
+              '            reg = <5>;\n'
+              '            phy-mode = "trgmii";\n'
+              '            link = <&mcm_port6>;\n\n'
+              '            fixed-link {\n'
+              '                speed = <1000>;\n'
+              '                full-duplex;\n'
+              '            };\n'
+              '        };\n\n'
+              '        port@6 {\n'
+              '            reg = <6>;\n'
+              '            label = "cpu";\n'
+              '            ethernet = <&gmac0>;\n'
+              '            phy-mode = "internal";\n\n'
+              '            fixed-link {\n'
+              '                speed = <1000>;\n'
+              '                full-duplex;\n'
+              '            };\n'
+              '        };\n'
+              '    };\n\n'
+              '    mdio: mdio {\n'
+              '        #address-cells = <1>;\n'
+              '        #size-cells = <0>;\n\n'
+              '        switch0: switch@1f {\n'
+              '            compatible = "econet,en751221";\n'
+              '            reg = <0x1f>;\n'
+              '            mediatek,mcm;\n'
+              '            resets = <&scuclk EN751221_GSW_RST>;\n'
+              '            reset-names = "mcm";\n'
+              '            dsa,member = <0 1>;\n\n'
+              '            #address-cells = <1>;\n'
+              '            #size-cells = <0>;\n\n'
+              '            ports {\n'
+              '                #address-cells = <1>;\n'
+              '                #size-cells = <0>;\n\n'
+              '                gsw_port1: port@1 {\n'
+              '                    reg = <1>;\n'
+              '                    label = "lan1";\n'
+              '                    phy-mode = "gmii";\n'
+              '                    phy-handle = <&gsw_phy1>;\n'
+              '                    status = "okay";\n'
+              '                };\n\n'
+              '                gsw_port2: port@2 {\n'
+              '                    reg = <2>;\n'
+              '                    label = "lan2";\n'
+              '                    phy-mode = "gmii";\n'
+              '                    phy-handle = <&gsw_phy2>;\n'
+              '                    status = "okay";\n'
+              '                };\n\n'
+              '                gsw_port3: port@3 {\n'
+              '                    reg = <3>;\n'
+              '                    label = "lan3";\n'
+              '                    phy-mode = "gmii";\n'
+              '                    phy-handle = <&gsw_phy3>;\n'
+              '                    status = "okay";\n'
+              '                };\n\n'
+              '                gsw_port4: port@4 {\n'
+              '                    reg = <4>;\n'
+              '                    label = "lan4";\n'
+              '                    phy-mode = "gmii";\n'
+              '                    phy-handle = <&gsw_phy4>;\n'
+              '                    status = "okay";\n'
+              '                };\n\n'
+              '                mcm_port6: port@6 {\n'
+              '                    reg = <6>;\n'
+              '                    phy-mode = "trgmii";\n'
+              '                    link = <&ondie_port5>;\n\n'
+              '                    fixed-link {\n'
+              '                        speed = <1000>;\n'
+              '                        full-duplex;\n'
+              '                    };\n'
+              '                };\n'
+              '            };\n\n'
+              '            mdio {\n'
+              '                #address-cells = <1>;\n'
+              '                #size-cells = <0>;\n\n'
+              '                gsw_phy1: ethernet-phy@1 {\n'
+              '                    compatible = "ethernet-phy-ieee802.3-c22";\n'
+              '                    reg = <1>;\n'
+              '                };\n\n'
+              '                gsw_phy2: ethernet-phy@2 {\n'
+              '                    compatible = "ethernet-phy-ieee802.3-c22";\n'
+              '                    reg = <2>;\n'
+              '                };\n\n'
+              '                gsw_phy3: ethernet-phy@3 {\n'
+              '                    compatible = "ethernet-phy-ieee802.3-c22";\n'
+              '                    reg = <3>;\n'
+              '                };\n\n'
+              '                gsw_phy4: ethernet-phy@4 {\n'
+              '                    compatible = "ethernet-phy-ieee802.3-c22";\n'
+              '                    reg = <4>;\n'
+              '                };\n'
+              '            };\n'
+              '        };\n'
+              '    };\n'
+              '};\n\n'
+              '\tpciecfg:',
+              s,
+              count=1,
+              flags=re.S,
+          )
+          if n != 1:
+              raise SystemExit("could not replace old EN751221 ethernet MDIO block")
+
+          p.write_text(s)
+          PY
+
+          grep -q 'reg = <0x1fb50000 0x8000>;' "$DTS"
+          grep -q 'compatible = "econet,en751221-switch";' "$DTS"
+          grep -q 'dsa,member = <0 0>;' "$DTS"
+          grep -q 'compatible = "econet,en751221";' "$DTS"
+          grep -q 'mediatek,mcm;' "$DTS"
+          grep -q 'dsa,member = <0 1>;' "$DTS"
+          grep -q 'link = <&mcm_port6>;' "$DTS"
+          grep -q 'link = <&ondie_port5>;' "$DTS"
+          grep -q 'label = "lan1";' "$DTS"
+          grep -q 'label = "lan2";' "$DTS"
+          grep -q 'label = "lan3";' "$DTS"
+          grep -q 'label = "lan4";' "$DTS"
+
       - name: Fix EN751221 kernel config
         shell: bash
         run: |
@@ -263,8 +484,14 @@ jobs:
           CONFIG="target/linux/econet/en751221/config-6.18"
           for line in \
             '# CONFIG_MEDIATEK_GE_SOC_PHY is not set' \
+            'CONFIG_NET_DSA=y' \
+            'CONFIG_NET_DSA_TAG_MTK=y' \
+            'CONFIG_PCS_MTK_LYNXI=y' \
             'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' \
-            'CONFIG_MTD_SPLIT_TCLINUX_FW=y'; do
+            'CONFIG_MTD_SPLIT_TCLINUX_FW=y' \
+            'CONFIG_DEVMEM=y' \
+            '# CONFIG_STRICT_DEVMEM is not set' \
+            '# CONFIG_IO_STRICT_DEVMEM is not set'; do
             grep -qxF "$line" "$CONFIG" || printf '%s\n' "$line" >> "$CONFIG"
           done
           grep -qxF 'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' "$CONFIG"
@@ -300,18 +527,18 @@ jobs:
           cat > target/linux/generic/files/drivers/mtd/mtdsplit/mtdsplit_tclinux.c <<'EOF'
           /* SPDX-License-Identifier: GPL-2.0-only */
           #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
-          
+
           #include <linux/module.h>
           #include <linux/slab.h>
           #include <linux/mtd/mtd.h>
           #include <linux/mtd/partitions.h>
           #include <linux/byteorder/generic.h>
           #include <linux/of.h>
-          
+
           #include "mtdsplit.h"
-          
+
           #define TCLINUX_HDRLEN 0x100
-          
+
           struct tclinux_header {
               u8 magic[4];
               __be32 hdrlen;
@@ -326,7 +553,7 @@ jobs:
               __be32 loadaddr;
               u8 reserved[128];
           } __packed;
-          
+
           static int read_header(struct mtd_info *mtd, size_t offset,
                                  struct tclinux_header *hdr)
           {
@@ -339,7 +566,7 @@ jobs:
                   return -EIO;
               return 0;
           }
-          
+
           static int mtdsplit_parse_tclinux(struct mtd_info *master,
                                             const struct mtd_partition **pparts,
                                             struct mtd_part_parser_data *data)
@@ -349,12 +576,12 @@ jobs:
               struct mtd_partition *parts;
               size_t offset;
               u32 hdrlen = 0, total_len = 0, kernel_len = 0, rootfs_len = 0;
-              u64 rootfs_offset = 0, end = 0;
+              u64 rootfs_offset = 0, end = 0, rootfs_size = 0;
               int ret;
-          
+
               if (!np || !of_device_is_compatible(np, "openwrt,tclinux"))
                   return -ENOENT;
-          
+
               for (offset = 0; offset + sizeof(hdr) <= master->size;
                    offset += master->erasesize) {
                   ret = read_header(master, offset, &hdr);
@@ -362,50 +589,59 @@ jobs:
                       continue;
                   if (memcmp(hdr.magic, "2RDH", 4))
                       continue;
-          
+
                   hdrlen = be32_to_cpu(hdr.hdrlen);
                   total_len = be32_to_cpu(hdr.total_len);
                   kernel_len = be32_to_cpu(hdr.kernel_len);
                   rootfs_len = be32_to_cpu(hdr.rootfs_len);
-          
+
                   if (hdrlen != TCLINUX_HDRLEN || !kernel_len || !rootfs_len)
                       continue;
-          
+
                   rootfs_offset = (u64)offset + hdrlen + kernel_len;
                   end = rootfs_offset + rootfs_len;
-          
+
                   if (rootfs_offset >= master->size || end > master->size)
                       continue;
                   if (total_len && (u64)offset + total_len > master->size)
                       continue;
                   break;
               }
-          
+
               if (offset >= master->size)
                   return -ENOENT;
-          
+
+              /*
+               * The header carries the exact squashfs length, which is not a multiple
+               * of 512. mtdblock rounds its size down to 512-byte sectors and squashfs
+               * refuses to mount when bytes_used exceeds the block device, so round
+               * the partition up to a whole erase block (never past the master).
+               */
+              rootfs_size = min_t(u64, roundup(rootfs_len, master->erasesize),
+                                  master->size - rootfs_offset);
+
               parts = kcalloc(2, sizeof(*parts), GFP_KERNEL);
               if (!parts)
                   return -ENOMEM;
-          
+
               parts[0].name = KERNEL_PART_NAME;
               parts[0].offset = offset + hdrlen;
               parts[0].size = kernel_len;
-          
+
               parts[1].name = ROOTFS_PART_NAME;
               parts[1].offset = rootfs_offset;
-              parts[1].size = rootfs_len;
-          
+              parts[1].size = rootfs_size;
+
               *pparts = parts;
               return 2;
           }
-          
+
           static const struct of_device_id tclinux_of_match[] = {
               { .compatible = "openwrt,tclinux" },
               {},
           };
           MODULE_DEVICE_TABLE(of, tclinux_of_match);
-          
+
           static struct mtd_part_parser tclinux_parser = {
               .owner = THIS_MODULE,
               .name = "tclinux-fw",
@@ -413,7 +649,7 @@ jobs:
               .parse_fn = mtdsplit_parse_tclinux,
               .type = MTD_PARSER_TYPE_FIRMWARE,
           };
-          
+
           module_mtd_part_parser(tclinux_parser);
           MODULE_LICENSE("GPL");
           EOF
@@ -507,48 +743,48 @@ jobs:
           #!/bin/sh
           set -eu
           umask 077
-          
+
           DB=/etc/accessctl/tokens.db
           LOCK=/etc/accessctl/.lock
           DIR=/etc/accessctl
-          
+
           init_db() {
               mkdir -p "$DIR"
               [ -e "$DB" ] || : > "$DB"
               chmod 600 "$DB"
           }
-          
+
           now_utc() { date -u +%s; }
-          
+
           token_hash() {
               printf '%s' "$1" | sha256sum | awk '{print $1}'
           }
-          
+
           gen_token() {
               head -c 32 /dev/urandom | base64 | tr -d '\r\n=' | tr '+/' '-_'
           }
-          
+
           lock() {
               while ! mkdir "$LOCK" 2>/dev/null; do sleep 1; done
               trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT INT TERM
           }
-          
+
           unlock() {
               trap - EXIT INT TERM
               rmdir "$LOCK" 2>/dev/null || true
           }
-          
+
           expiry_text() {
               case "$1" in
                   0) printf '%s' 'NEVER' ;;
                   *) date -u -d "@$1" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf '%s' "$1" ;;
               esac
           }
-          
+
           safe_name() {
               printf '%s' "$1" | tr '\r\n|' '   ' | cut -c1-80
           }
-          
+
           create_user() {
               name=$1
               days=$2
@@ -565,7 +801,7 @@ jobs:
               unlock
               printf 'Name: %s\nID: %s\nExpires: %s\nToken: %s\n' "$name" "$id" "$(expiry_text "$expires")" "$token"
           }
-          
+
           create_master() {
               init_db
               lock
@@ -582,7 +818,7 @@ jobs:
               unlock
               printf 'Type: MASTER\nID: %s\nExpires: NEVER\nToken: %s\n' "$id" "$token"
           }
-          
+
           revoke_match() {
               key=$1
               init_db
@@ -600,7 +836,7 @@ jobs:
               unlock
               echo 'Token revoked/deleted.'
           }
-          
+
           renew() {
               id=$1
               days=$2
@@ -631,7 +867,7 @@ jobs:
               unlock
               printf 'ID: %s\nNew expiry: %s\n' "$id" "$(expiry_text "$expires")"
           }
-          
+
           gc() {
               init_db
               now=$(now_utc)
@@ -652,7 +888,7 @@ jobs:
               unlock
               [ "$removed" -eq 0 ] || logger -t accessctl "removed $removed expired token(s)"
           }
-          
+
           check_token() {
               tok=$1
               init_db
@@ -669,7 +905,7 @@ jobs:
               fi
               printf '%s|%s|%s\n' "$type" "$id" "$name"
           }
-          
+
           list_tokens() {
               init_db
               printf '%-14s %-8s %-24s %s\n' ID TYPE NAME EXPIRES
@@ -678,7 +914,7 @@ jobs:
                   printf '%-14s %-8s %-24s %s\n' "$id" "$type" "$name" "$(expiry_text "$expires")"
               done < "$DB"
           }
-          
+
           usage() {
               echo 'Usage:'
               echo '  accessctl create --name NAME --days DAYS'
@@ -689,7 +925,7 @@ jobs:
               echo '  accessctl master create|rotate|revoke'
               echo '  accessctl gc'
           }
-          
+
           init_db
           case "${1-}" in
               create)
@@ -725,25 +961,22 @@ jobs:
               gc) gc ;;
               *) usage >&2; exit 2 ;;
           esac
-          ACCESSCTL_EOF
-
-          cat > files/usr/lib/opennds/ac1000hi-token.sh <<'EOF'
           #!/bin/sh
-          
+
           title="AC1000HI Network Access"
           randquery="$(date +%s | sha256sum | awk '{print $1}')"
-          
+
           sessiontimeout="60"
           upload_rate="10000"
           download_rate="10000"
           upload_quota="0"
           download_quota="0"
           quotas="$sessiontimeout $upload_rate $download_rate $upload_quota $download_quota"
-          
+
           additionalthemevars="token mode"
           fasvarlist="$fasvarlist $additionalthemevars"
           userinfo="$title"
-          
+
           page_header() {
               echo '<!doctype html><html><head>'
               echo '<meta name="viewport" content="width=device-width,initial-scale=1">'
@@ -752,12 +985,12 @@ jobs:
               echo '<div style="max-width:520px;margin:30px auto;font-family:sans-serif;text-align:center">'
               echo '<h2>AC1000HI Wi-Fi</h2>'
           }
-          
+
           page_footer() {
               echo '</div></body></html>'
               exit 0
           }
-          
+
           login_page() {
               page_header
               if [ "${error-}" = 1 ]; then
@@ -780,7 +1013,7 @@ jobs:
               fi
               page_footer
           }
-          
+
           success_page() {
               kind=$1
               cookie_age=2592000
@@ -797,12 +1030,12 @@ jobs:
               echo "<p><a href=\"http://$gatewayfqdn/?$randquery\">Continue</a></p>"
               page_footer
           }
-          
+
           do_auth() {
               quotas="$sessiontimeout $upload_rate $download_rate $upload_quota $download_quota"
               auth_log
           }
-          
+
           generate_splash_sequence() {
               case "${mode-}" in
                   token)
@@ -837,6 +1070,45 @@ jobs:
           test -x files/usr/lib/opennds/ac1000hi-token.sh
           test -f files/etc/config/opennds
 
+
+      - name: Install DSA LAN network defaults
+        shell: bash
+        run: |
+          set -eux
+          mkdir -p files/etc/uci-defaults
+          cat > files/etc/uci-defaults/99-dsa-lan <<'EOF'
+          #!/bin/sh
+          # EN751221: DSA switch ports. lan1=WAN, lan2..lan4=LAN bridge.
+          set -e
+          . /lib/functions.sh
+
+          uci -q delete network.lan1
+          uci -q delete network.lan2
+          uci -q delete network.lan3
+          uci -q delete network.lan4
+
+          uci set network.br_lan=device
+          uci set network.br_lan.name='br-lan'
+          uci set network.br_lan.type='bridge'
+          uci -q delete network.br_lan.ports
+          uci add_list network.br_lan.ports='lan2'
+          uci add_list network.br_lan.ports='lan3'
+          uci add_list network.br_lan.ports='lan4'
+
+          uci set network.lan.device='br-lan'
+          uci set network.lan.proto='static'
+          uci set network.lan.ipaddr='192.168.5.1'
+          uci set network.lan.netmask='255.255.255.0'
+
+          uci set network.wan.device='lan1'
+          uci set network.wan.proto='dhcp'
+
+          uci commit network
+          exit 0
+          EOF
+          chmod 755 files/etc/uci-defaults/99-dsa-lan
+          test -x files/etc/uci-defaults/99-dsa-lan
+
       - name: Configure EN751221 FULL image
         shell: bash
         run: |
@@ -847,6 +1119,14 @@ jobs:
           CONFIG_TARGET_econet_en751221_DEVICE_en751221_generic=y
           CONFIG_TARGET_ROOTFS_INITRAMFS=y
           CONFIG_KERNEL_MEDIATEK_GE_SOC_PHY=n
+          CONFIG_USE_APK=n
+          CONFIG_PACKAGE_opkg=y
+          CONFIG_PACKAGE_apk-mbedtls=n
+          CONFIG_BUSYBOX_CUSTOM=y
+          CONFIG_BUSYBOX_CONFIG_DEVMEM=y
+
+          CONFIG_PACKAGE_kmod-econet-eth=y
+          CONFIG_PACKAGE_kmod-dsa=y
 
           CONFIG_PACKAGE_base-files=y
           CONFIG_PACKAGE_netifd=y
@@ -855,7 +1135,6 @@ jobs:
           CONFIG_PACKAGE_mdio-tools=y
           CONFIG_PACKAGE_ip-full=y
           CONFIG_PACKAGE_ip-bridge=y
-
           CONFIG_PACKAGE_dnsmasq-full=y
           CONFIG_PACKAGE_firewall4=y
           CONFIG_PACKAGE_nftables-json=y
@@ -903,7 +1182,6 @@ jobs:
           CONFIG_PACKAGE_kmod-nf-nat6=y
           CONFIG_PACKAGE_kmod-nf-reject=y
           CONFIG_PACKAGE_kmod-nf-reject6=y
-          CONFIG_PACKAGE_kmod-ipt-core=y
           CONFIG_PACKAGE_kmod-tun=y
 
           CONFIG_PACKAGE_luci=y
@@ -986,7 +1264,18 @@ jobs:
           make defconfig
 
 
+          # Linux 6.18: kmod-iptables and kmod-nf-ipt both ship ip_tables.ko/x_tables.ko,
+          # so selecting kmod-ipt-core (iptables-legacy) breaks rootfs install with
+          # check_data_file_clashes. This image uses nftables/firewall4 only.
+          if grep -Eq '^CONFIG_PACKAGE_(kmod-ipt-core|kmod-nf-ipt|kmod-iptables)=[ym]' .config; then
+            echo 'ERROR: legacy iptables kmods selected; they clash on kernel 6.18'
+            grep -E '^CONFIG_PACKAGE_(kmod-ipt-core|kmod-nf-ipt|kmod-iptables)=' .config
+            exit 1
+          fi
           grep -qxF 'CONFIG_PACKAGE_opennds=y' .config
+          grep -qxF 'CONFIG_PACKAGE_opkg=y' .config
+          grep -qxF '# CONFIG_USE_APK is not set' .config
+          grep -q 'parts\[1\].size = rootfs_size;' target/linux/generic/files/drivers/mtd/mtdsplit/mtdsplit_tclinux.c
           echo "=== Selected device profile(s) in .config ==="
           grep -E '^CONFIG_TARGET_(DEVICE_)?econet_en751221_DEVICE_|^CONFIG_TARGET_MULTI_PROFILE|^CONFIG_TARGET_ALL_PROFILES|^CONFIG_IB=' .config || true
           grep -qxF 'CONFIG_TARGET_econet_en751221_DEVICE_en751221_generic=y' .config
@@ -994,7 +1283,7 @@ jobs:
           grep -qxF 'CONFIG_MTD_SPLIT_TCLINUX_FW=y' target/linux/econet/en751221/config-6.18
           grep -qxF 'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' target/linux/econet/en751221/config-6.18
           test -f target/linux/generic/files/drivers/mtd/mtdsplit/mtdsplit_tclinux.c
- 
+
 
       - name: Calculate build cache key
         shell: bash
@@ -1015,13 +1304,17 @@ jobs:
               sha256sum files/usr/lib/opennds/ac1000hi-token.sh
               sha256sum files/etc/config/opennds
               sha256sum files/etc/crontabs/root
-              printf '%s\n' 'AC1000HI_RELEASE_STACK=v3-20261001-nand-layout-verified'
+              sha256sum package/kernel/econet-eth/Makefile
+              sha256sum files/etc/uci-defaults/99-dsa-lan
+              cat ci/patches/*.patch 2>/dev/null | sha256sum || true
+              printf '%s\n' 'AC1000HI_RELEASE_STACK=v4-mt7530-dsa-cascade'
               printf '%s\n' 'EN751221_ZBOOT_KERNEL_LOAD=0x85000000'
               printf '%s\n' 'AC1000HI_NAND_SIZE=0x08000000'
               printf '%s\n' 'AC1000HI_NAND_ERASEBLOCK=0x20000'
               printf '%s\n' 'AC1000HI_NAND_RESERVE_BLOCKS=81'
               printf '%s\n' 'AC1000HI_NAND_RAWB=0x075e0000'
               printf '%s\n' 'AC1000HI_NAND_BMT=0x07fe0000'
+              printf '%s\n' 'EN751221_DSA_DRIVER=df20a0548c9142ef80ee613a81da90885b57e6c5'
             } | sha256sum | cut -d' ' -f1
           )"
           BUILD_CACHE_KEY="${{ runner.os }}-openwrt-en751221-ac1000hi-v4-${OPENWRT_REV}-${FEEDS_REV_HASH}-${BUILD_HASH}"
@@ -1058,6 +1351,9 @@ jobs:
           yes "" | make kernel_oldconfig V=s || true
           cp /tmp/config-6.18.bak "$CONFIG_6_18"
           grep -qxF '# CONFIG_MEDIATEK_GE_SOC_PHY is not set' "$CONFIG_6_18"
+          grep -qxF 'CONFIG_NET_DSA=y' "$CONFIG_6_18"
+          grep -qxF 'CONFIG_NET_DSA_TAG_MTK=y' "$CONFIG_6_18"
+          grep -qxF 'CONFIG_PCS_MTK_LYNXI=y' "$CONFIG_6_18"
           grep -qxF 'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' "$CONFIG_6_18"
           grep -qxF 'CONFIG_MTD_SPLIT_TCLINUX_FW=y' "$CONFIG_6_18"
 
@@ -1151,6 +1447,20 @@ jobs:
           grep -q \
             'reg = <0x04680000 0x02ec0000>;' \
             "$DTS"
+
+          echo "=== MT7530 DSA ==="
+
+          grep -qF 'compatible = "econet,en751221-switch";' "$DTS"
+          grep -qF 'reg = <0x1fb58000 0x8000>;' "$DTS"
+          grep -qF 'reg = <0x1fb50000 0x8000>;' "$DTS"
+          grep -qF 'dsa,member = <0 0>;' "$DTS"
+          grep -qF 'compatible = "econet,en751221";' "$DTS"
+          grep -qF 'dsa,member = <0 1>;' "$DTS"
+          grep -qF 'mediatek,mcm;' "$DTS"
+          grep -qF 'label = "lan2";' "$DTS"
+          grep -qF 'label = "lan3";' "$DTS"
+          grep -qF 'label = "lan4";' "$DTS"
+          test -s package/kernel/econet-eth/Makefile
 
           echo "=== zboot ==="
 
