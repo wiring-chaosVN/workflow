@@ -328,13 +328,13 @@ jobs:
         run: |
           set -euxo pipefail
 
-          DTS="target/linux/econet/dts/en751221_generic.dts"
+          DTSI="target/linux/econet/dts/en751221.dtsi"
 
           python3 - <<'PY'
           from pathlib import Path
           import re
 
-          p = Path("target/linux/econet/dts/en751221_generic.dts")
+          p = Path("target/linux/econet/dts/en751221.dtsi")
           s = p.read_text()
 
           # The DSA conduit must stop before the integrated MT7530 register
