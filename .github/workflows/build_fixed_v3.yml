@@ -961,6 +961,9 @@ jobs:
               gc) gc ;;
               *) usage >&2; exit 2 ;;
           esac
+          ACCESSCTL_EOF
+          
+          cat > files/usr/lib/opennds/ac1000hi-token.sh <<'EOF'
           #!/bin/sh
 
           title="AC1000HI Network Access"
