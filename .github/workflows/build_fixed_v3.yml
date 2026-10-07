@@ -328,7 +328,7 @@ jobs:
         run: |
           set -euxo pipefail
 
-          DTSI="target/linux/econet/dts/en751221.dtsi"
+          DTS="target/linux/econet/dts/en751221.dtsi"
 
           python3 - <<'PY'
           from pathlib import Path
@@ -1398,6 +1398,7 @@ jobs:
           set -euxo pipefail
 
           DTS="target/linux/econet/dts/en751221_generic.dts"
+          DTSI="target/linux/econet/dts/en751221.dtsi"
           CONFIG="target/linux/econet/en751221/config-6.18"
           IMAGE_MK="target/linux/econet/image/en751221.mk"
 
@@ -1453,16 +1454,16 @@ jobs:
 
           echo "=== MT7530 DSA ==="
 
-          grep -qF 'compatible = "econet,en751221-switch";' "$DTS"
-          grep -qF 'reg = <0x1fb58000 0x8000>;' "$DTS"
-          grep -qF 'reg = <0x1fb50000 0x8000>;' "$DTS"
-          grep -qF 'dsa,member = <0 0>;' "$DTS"
-          grep -qF 'compatible = "econet,en751221";' "$DTS"
-          grep -qF 'dsa,member = <0 1>;' "$DTS"
-          grep -qF 'mediatek,mcm;' "$DTS"
-          grep -qF 'label = "lan2";' "$DTS"
-          grep -qF 'label = "lan3";' "$DTS"
-          grep -qF 'label = "lan4";' "$DTS"
+          grep -qF 'compatible = "econet,en751221-switch";' "$DTSI"
+          grep -qF 'reg = <0x1fb58000 0x8000>;' "$DTSI"
+          grep -qF 'reg = <0x1fb50000 0x8000>;' "$DTSI"
+          grep -qF 'dsa,member = <0 0>;' "$DTSI"
+          grep -qF 'compatible = "econet,en751221";' "$DTSI"
+          grep -qF 'dsa,member = <0 1>;' "$DTSI"
+          grep -qF 'mediatek,mcm;' "$DTSI"
+          grep -qF 'label = "lan2";' "$DTSI"
+          grep -qF 'label = "lan3";' "$DTSI"
+          grep -qF 'label = "lan4";' "$DTSI"
           test -s package/kernel/econet-eth/Makefile
 
           echo "=== zboot ==="
