@@ -1,4 +1,4 @@
-name: build v5 - EN751221 WAN port split
+name: build v5
 
 on:
   workflow_dispatch:
