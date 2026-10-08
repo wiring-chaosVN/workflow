@@ -458,12 +458,17 @@ jobs:
           insert_after(lines, 'sport = get_erx_sport(&desc.msg.erx);', [
               TAB + 'sp_tag = get_erx_sp_tag(&desc.msg.erx);',
           ], 'RX special-tag extraction')
-          insert_after(lines, 'sp_tag = get_erx_sp_tag(&desc.msg.erx);', [
-              TAB + 'if (en75_rx_before_recv(q->qdma->eth, skb, sport, sp_tag))',
-          ], 'RX special-tag dispatch')
+          replaced = False
           for i, line in enumerate(lines):
               if line.strip() == 'if (en75_rx_before_recv(q->qdma->eth, skb, sport))':
-                  raise SystemExit('old RX dispatch survived')
+                  prefix = line[:len(line) - len(line.lstrip())]
+                  lines[i] = prefix + 'if (en75_rx_before_recv(q->qdma->eth, skb, sport, sp_tag))'
+                  replaced = True
+                  break
+          if not replaced:
+              raise SystemExit('missing RX dispatch')
+          if any(line.strip() == 'if (en75_rx_before_recv(q->qdma->eth, skb, sport))' for line in lines):
+              raise SystemExit('old RX dispatch survived')
           write('econet_qdma.c', lines)
 
           print('source transformations verified')
