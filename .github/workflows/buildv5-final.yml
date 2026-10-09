@@ -474,6 +474,11 @@ jobs:
           print('source transformations verified')
           PY
 
+          sed -i -E 's/[[:space:]]+$//' \
+            "$TMP"/econet_eth.h \
+            "$TMP"/econet_eth.c \
+            "$TMP"/econet_port.c \
+            "$TMP"/econet_qdma.c
           git -C "$TMP" diff --check
           git -C "$TMP" diff --no-ext-diff -- econet_eth.h econet_eth.c econet_port.c econet_qdma.c > "$PATCH_FILE"
           test -s "$PATCH_FILE"
