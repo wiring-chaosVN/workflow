@@ -1,4 +1,4 @@
-name: build v6 - v5 + external inputs + fpt_0 as MT7615 EEPROM
+name: build v6 right after v5
 
 on:
   workflow_dispatch:
