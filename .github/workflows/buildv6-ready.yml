@@ -1,0 +1,1921 @@
+name: build v6 - v5 + external inputs + fpt_0 as MT7615 EEPROM
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout OpenWrt
+        uses: actions/checkout@v4
+        with:
+          repository: openwrt/openwrt
+          ref: c2eb687d76a04bd66e45fdb2e47998f8f0f565b0
+          fetch-depth: 1
+
+      - name: Record OpenWrt revision
+        shell: bash
+        run: |
+          set -eux
+          OPENWRT_REV="$(git rev-parse HEAD)"
+          echo "OPENWRT_REV=$OPENWRT_REV" >> "$GITHUB_ENV"
+          echo "OpenWrt revision: $OPENWRT_REV"
+
+      - name: Checkout CI repo (local patches)
+        uses: actions/checkout@v4
+        with:
+          path: ci
+
+      - name: Free runner disk space
+        shell: bash
+        run: |
+          set -eux
+          sudo rm -rf /usr/local/lib/android
+          sudo rm -rf /usr/share/dotnet
+          sudo rm -rf /opt/ghc
+          sudo rm -rf /opt/hostedtoolcache
+          df -h
+
+      - name: Install build dependencies
+        shell: bash
+        run: |
+          set -eux
+          sudo apt-get update
+          sudo apt-get install -y \
+            build-essential clang flex bison gawk gcc-multilib g++-multilib \
+            gettext git libncurses5-dev libssl-dev python3 python3-setuptools \
+            python3-pip rsync unzip zlib1g-dev file wget curl xsltproc
+
+      - name: Configure OpenNDS routing feed
+        shell: bash
+        run: |
+          set -eux
+          if grep -q '^src-git routing ' feeds.conf.default; then
+            sed -i 's#^src-git routing .*#src-git routing https://github.com/openNDS/openwrt-routing.git#' feeds.conf.default
+          else
+            printf '%s\n' 'src-git routing https://github.com/openNDS/openwrt-routing.git' >> feeds.conf.default
+          fi
+          grep -qxF 'src-git routing https://github.com/openNDS/openwrt-routing.git' feeds.conf.default
+
+      - name: Restore OpenWrt downloads and feeds
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            dl
+            feeds
+          key: ${{ runner.os }}-openwrt-downloads-${{ env.OPENWRT_REV }}-${{ hashFiles('feeds.conf.default') }}
+          restore-keys: |
+            ${{ runner.os }}-openwrt-downloads-
+
+      - name: Update and install required OpenWrt feeds
+        shell: bash
+        run: |
+          set -eux
+          ./scripts/feeds update packages
+          ./scripts/feeds update luci
+          ./scripts/feeds update routing
+
+          ./scripts/feeds install -a -p packages
+          ./scripts/feeds install -a -p luci
+          ./scripts/feeds install -a -p routing
+
+          test -d feeds/packages
+          test -d feeds/luci
+          test -d feeds/routing
+
+          FEEDS_REV_HASH="$(
+            {
+              git -C feeds/packages rev-parse HEAD
+              git -C feeds/luci rev-parse HEAD
+              git -C feeds/routing rev-parse HEAD
+            } | sha256sum | cut -d' ' -f1
+          )"
+          echo "FEEDS_REV_HASH=$FEEDS_REV_HASH" >> "$GITHUB_ENV"
+          echo "Feeds revision hash: $FEEDS_REV_HASH"
+
+      - name: Save OpenWrt downloads and feeds
+        if: success()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            dl
+            feeds
+          key: ${{ runner.os }}-openwrt-downloads-${{ env.OPENWRT_REV }}-${{ hashFiles('feeds.conf.default') }}
+
+      - name: Generate EN751221 special-tag 4-port driver patch
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ECONET_ETH_REV='3ba0abe30cfa0dc1e76e41218140bc061be131fb'
+          ECONET_ETH_URL='https://github.com/cjdelisle/econet_eth.git'
+          TMP="$(mktemp -d)"
+          PATCH_DIR='package/kernel/econet-eth/patches'
+          PATCH_FILE="$PATCH_DIR/990-en751221-mtk-special-tag-four-ports.patch"
+          trap 'rm -rf "$TMP"' EXIT
+
+          mkdir -p "$PATCH_DIR"
+          git init -q "$TMP"
+          git -C "$TMP" remote add origin "$ECONET_ETH_URL"
+          git -C "$TMP" fetch -q --depth=1 origin "$ECONET_ETH_REV"
+          git -C "$TMP" checkout -q FETCH_HEAD
+          test "$(git -C "$TMP" rev-parse HEAD)" = "$ECONET_ETH_REV"
+
+          python3 - "$TMP" <<'PY'
+          from pathlib import Path
+          import sys
+
+          TAB = chr(9)
+          NL = chr(10)
+          BS = chr(92)
+          root = Path(sys.argv[1])
+
+          def read(path):
+              return (root / path).read_text().splitlines()
+
+          def write(path, lines):
+              (root / path).write_text(NL.join(lines) + NL)
+
+          def insert_after(lines, needle, additions, label):
+              for i, line in enumerate(lines):
+                  if line.strip() == needle.strip():
+                      lines[i + 1:i + 1] = additions
+                      return
+              raise SystemExit(f'missing line: {label}')
+
+          # econet_eth.h
+          lines = read('econet_eth.h')
+          found = False
+          for i, line in enumerate(lines):
+              if line.strip() == '#define EN75_NUM_GDM_PORTS' + TAB + '2':
+                  lines[i] = '#define EN75_NUM_GDM_PORTS' + TAB + '4'
+                  found = True
+                  break
+          if not found:
+              raise SystemExit('missing four-GDM define')
+          for i, line in enumerate(lines):
+              if line.strip() == 'enum etx_fport sport);':
+                  lines[i] = TAB * 3 + 'enum etx_fport sport, u16 sp_tag);'
+                  break
+          else:
+              raise SystemExit('missing RX prototype')
+          for i, line in enumerate(lines):
+              if line.strip() == 'bool has_g2_stats);':
+                  prefix = line[:len(line) - len(line.lstrip())]
+                  lines[i:i + 1] = [
+                      prefix + 'u8 switch_port,',
+                      prefix + 'const u8 *shared_mac,',
+                      line,
+                  ]
+                  break
+          else:
+              raise SystemExit('missing allocator prototype')
+          write('econet_eth.h', lines)
+
+          # econet_eth.c
+          lines = read('econet_eth.c')
+          for i, line in enumerate(lines):
+              if line == '#include <linux/skbuff.h>':
+                  lines.insert(i + 1, '#include <linux/delay.h>')
+                  break
+          else:
+              raise SystemExit('missing skbuff include')
+
+          for i, line in enumerate(lines):
+              if line == '#define SWITCH_MAC_LO' + TAB * 3 + '0x30e4':
+                  add = [
+                      '',
+                      '#define MT753X_PORT_PCR(x)' + TAB * 2 + '(0x2004 + ((x) * 0x100))',
+                      '#define MT753X_PORT_PVC(x)' + TAB * 2 + '(0x2010 + ((x) * 0x100))',
+                      '#define MT753X_PORT_PPBV1(x)' + TAB * 2 + '(0x2014 + ((x) * 0x100))',
+                      '#define MT753X_VTCR' + TAB * 3 + '0x90',
+                      '#define MT753X_VAWD1' + TAB * 3 + '0x94',
+                      '#define MT753X_VAWD2' + TAB * 3 + '0x98',
+                      '#define MT753X_VTIM(x)' + TAB * 3 + '(0x100 + (4 * ((x) / 2)))',
+                      '',
+                      '#define MT753X_VTCR_BUSY' + TAB * 3 + 'BIT(31)',
+                      '#define MT753X_VLAN_VAWD1_IVL_MAC' + TAB + 'BIT(30)',
+                      '#define MT753X_VLAN_VAWD1_VTAG_EN' + TAB + 'BIT(28)',
+                      '#define MT753X_VLAN_VAWD1_VALID' + TAB * 2 + 'BIT(0)',
+                      '',
+                      '#define MT753X_PHYS_PORT_MASK' + TAB * 2 + '0x0000005eU',
+                      '#define MT753X_CPU_PORT' + TAB * 3 + '6',
+                      '#define MT753X_WAN_PORT_MATRIX' + TAB * 2 + '0x00420003U',
+                      '#define MT753X_LAN_PORT_MATRIX' + TAB * 2 + '0x005c0003U',
+                      '#define MT753X_CPU_PORT_MATRIX' + TAB * 2 + '0x001e0003U',
+                  ]
+                  lines[i + 1:i + 1] = add
+                  break
+          else:
+              raise SystemExit('missing switch MAC definitions')
+
+          start = next((i for i, l in enumerate(lines) if l.startswith('static struct net_device *en75_get_sport_dev')), None)
+          # Replace only the head of en75_rx_before_recv (up to eth_type_trans); keep the original tail
+          # (DSA block, return 0, closing brace) and en75_port_set_macaddr untouched.
+          end = next((i + 1 for i, l in enumerate(lines) if l.strip() == 'skb->protocol = eth_type_trans(skb, port);'), None)
+          if start is None or end is None or end <= start:
+              raise SystemExit('missing RX mapping functions')
+          dns = f'dev_info(eth->pub.dev, "rx: on unexpected fport %d{BS}n", sport);'
+          dns2 = f'dev_info(eth->pub.dev, "rx: invalid switch port in special tag 0x%04x{BS}n", sp_tag);'
+          rx_block = [
+              'static struct net_device *en75_get_sport_dev(struct en75_eth_pvt *eth,',
+              TAB * 5 + 'enum etx_fport sport, u16 sp_tag)',
+              '{',
+              TAB + 'u8 swport;',
+              '',
+              TAB + 'if (sport != ETX_FPORT_GDM1) {',
+              TAB * 2 + 'if (sport == ETX_FPORT_GDM2)',
+              TAB * 3 + 'return eth->ports[1];',
+              '',
+              TAB * 2 + dns,
+              TAB * 2 + 'return eth->ports[0];',
+              TAB + '}',
+              '',
+              TAB + 'swport = sp_tag & 0x7;',
+              TAB + 'if (swport >= 1 && swport <= 4 && eth->ports[swport - 1])',
+              TAB * 2 + 'return eth->ports[swport - 1];',
+              '',
+              TAB + dns2,
+              TAB + 'return eth->ports[0];',
+              '}',
+              '',
+              'int en75_rx_before_recv(struct en75_eth *eth, struct sk_buff *skb,',
+              TAB * 3 + 'enum etx_fport sport, u16 sp_tag)',
+              '{',
+              TAB + 'struct en75_eth_pvt *ep = (struct en75_eth_pvt *) eth;',
+              TAB + 'struct net_device *port;',
+              '',
+              TAB + 'port = en75_get_sport_dev(ep, sport, sp_tag);',
+              '',
+              TAB + 'if (!port)',
+              TAB * 2 + 'return -ENODEV;',
+              '',
+              TAB + 'skb->dev = port;',
+              TAB + 'skb->protocol = eth_type_trans(skb, port);',
+          ]
+          lines[start:end] = rx_block
+
+          start = next((i for i, l in enumerate(lines) if l.startswith('static int en75_init_port')), None)
+          end = next((i for i, l in enumerate(lines) if l.startswith('static void en75_prepare_qdma_cfg')), None)
+          if start is None or end is None or end <= start:
+              raise SystemExit('missing en75_init_port')
+          init_block = [
+              'static int en75_init_port(struct en75_eth_pvt *eth, struct device_node *np)',
+              '{',
+              TAB + 'const __be32 *id_ptr = of_get_property(np, "reg", NULL);',
+              TAB + 'struct net_device *dev;',
+              TAB + 'const u8 *shared_mac = NULL;',
+              TAB + 'u32 id;',
+              '',
+              TAB + 'if (!id_ptr) {',
+              TAB * 2 + f'dev_err(eth->pub.dev, "missing gdm port id{BS}n");',
+              TAB * 2 + 'return -EINVAL;',
+              TAB + '}',
+              '',
+              TAB + 'id = be32_to_cpup(id_ptr) + 1;',
+              '',
+              TAB + 'if (!id || id > ARRAY_SIZE(eth->ports)) {',
+              TAB * 2 + f'dev_err(eth->pub.dev, "invalid gdm port id: %d{BS}n", id);',
+              TAB * 2 + 'return -EINVAL;',
+              TAB + '}',
+              '',
+              TAB + 'if (eth->ports[id - 1]) {',
+              TAB * 2 + f'dev_err(eth->pub.dev, "duplicate gdm port id: %d{BS}n", id);',
+              TAB * 2 + 'return -EINVAL;',
+              TAB + '}',
+              '',
+              TAB + 'if (id > 1) {',
+              TAB * 2 + 'if (!eth->ports[0])',
+              TAB * 3 + 'return -EINVAL;',
+              TAB * 2 + 'shared_mac = eth->ports[0]->dev_addr;',
+              TAB + '}',
+              '',
+              TAB + 'dev = en75_alloc_gdm_port(&eth->pub, np,',
+              TAB * 4 + '&eth->regs->port0.regs,',
+              TAB * 4 + 'eth->qdma[0],',
+              TAB * 4 + 'ETX_FPORT_GDM1,',
+              TAB * 4 + 'id,',
+              TAB * 4 + 'shared_mac,',
+              TAB * 4 + 'false);',
+              TAB + 'if (IS_ERR(dev))',
+              TAB * 2 + 'return PTR_ERR(dev);',
+              '',
+              TAB + 'eth->ports[id - 1] = dev;',
+              TAB + 'return 0;',
+              '}',
+          ]
+          lines[start:end] = init_block + ['']
+
+          insert_at = next((i for i, l in enumerate(lines) if l.startswith('static void en75_remove')), None)
+          if insert_at is None:
+              raise SystemExit('missing en75_remove')
+          switch_fn = [
+              'static void en75_switch_write_vlan(struct en751221_regs __iomem *regs,',
+              TAB * 5 + 'int entry, u16 vid, u8 members)',
+              '{',
+              TAB + 'u32 val;',
+              TAB + 'int i;',
+              '',
+              TAB + 'val = en75_rreg(&regs->switch_regs[MT753X_VTIM(entry) / 4]);',
+              TAB + 'if (entry & 1)',
+              TAB * 2 + 'val = (val & 0x00000fffU) | ((u32)vid << 12);',
+              TAB + 'else',
+              TAB * 2 + 'val = (val & 0x00fff000U) | vid;',
+              TAB + 'en75_wreg(val, &regs->switch_regs[MT753X_VTIM(entry) / 4]);',
+              '',
+              TAB + 'en75_wreg((u32)(MT753X_VLAN_VAWD1_IVL_MAC |',
+              TAB * 2 + 'MT753X_VLAN_VAWD1_VTAG_EN |',
+              TAB * 2 + '((u32)members << 16) |',
+              TAB * 2 + 'MT753X_VLAN_VAWD1_VALID),',
+              TAB * 2 + '&regs->switch_regs[MT753X_VAWD1 / 4]);',
+              '',
+              TAB + 'en75_wreg((u32)0, &regs->switch_regs[MT753X_VAWD2 / 4]);',
+              '',
+              TAB + 'en75_wreg((u32)(MT753X_VTCR_BUSY | (1U << 12) | (u32)entry),',
+              TAB * 2 + '&regs->switch_regs[MT753X_VTCR / 4]);',
+              '',
+              TAB + 'for (i = 0; i < 20; i++) {',
+              TAB * 2 + 'if (!(en75_rreg(&regs->switch_regs[MT753X_VTCR / 4]) &',
+              TAB * 3 + 'MT753X_VTCR_BUSY))',
+              TAB * 3 + 'break;',
+              TAB * 2 + 'udelay(1000);',
+              TAB + '}',
+              '}',
+              '',
+              'static void en751221_switch_init(struct en751221_regs __iomem *regs)',
+              '{',
+              TAB + 'static const u32 pcr[] = {',
+              TAB * 2 + '0x00400003U, /* port 0 unused */',
+              TAB * 2 + 'MT753X_WAN_PORT_MATRIX,',
+              TAB * 2 + 'MT753X_LAN_PORT_MATRIX,',
+              TAB * 2 + 'MT753X_LAN_PORT_MATRIX,',
+              TAB * 2 + 'MT753X_LAN_PORT_MATRIX,',
+              TAB * 2 + '0x00000003U, /* port 5 unused */',
+              TAB * 2 + 'MT753X_CPU_PORT_MATRIX,',
+              TAB + '};',
+              TAB + 'int i;',
+              '',
+              TAB + 'for (i = 0; i < ARRAY_SIZE(pcr); i++)',
+              TAB * 2 + 'en75_wreg(pcr[i], &regs->switch_regs[MT753X_PORT_PCR(i) / 4]);',
+              '',
+              TAB + 'for (i = 0; i <= 4; i++) {',
+              TAB * 2 + 'en75_wreg(0x81008100U,',
+              TAB * 3 + '&regs->switch_regs[MT753X_PORT_PVC(i) / 4]);',
+              TAB * 2 + 'en75_wreg(0x00010001U + i,',
+              TAB * 3 + '&regs->switch_regs[MT753X_PORT_PPBV1(i) / 4]);',
+              TAB + '}',
+              '',
+              TAB + 'en75_wreg(0x81008120U,',
+              TAB * 2 + '&regs->switch_regs[MT753X_PORT_PVC(MT753X_CPU_PORT) / 4]);',
+              TAB + 'en75_wreg(0x00010007U,',
+              TAB * 2 + '&regs->switch_regs[MT753X_PORT_PPBV1(MT753X_CPU_PORT) / 4]);',
+              '',
+              TAB + 'for (i = 0; i < 7; i++)',
+              TAB * 2 + 'en75_switch_write_vlan(regs, i, i + 1, MT753X_PHYS_PORT_MASK);',
+              '',
+              TAB + '/* GDM1 CPU-side tag handling: TPID 0x8100, strip on RX, insert on TX. */',
+              TAB + '{',
+              TAB * 2 + 'struct gdm_vlan vlan = en75_rreg(&regs->port0.regs.vlan);',
+              '',
+              TAB * 2 + 'vlan.tpid = 0x8100;',
+              TAB * 2 + 'set_gdm_vlan_urx(&vlan, true);',
+              TAB * 2 + 'set_gdm_vlan_ttx(&vlan, true);',
+              TAB * 2 + 'en75_wreg(vlan, &regs->port0.regs.vlan);',
+              TAB + '}',
+              '}',
+              '',
+          ]
+          lines[insert_at:insert_at] = switch_fn
+
+          # Switch init call.
+          for i, line in enumerate(lines):
+              if 'en75_wreg(EN75_MFC_CONFIG' in line:
+                  lines.insert(i + 1, TAB * 2 + 'en751221_switch_init(regs);')
+                  break
+          else:
+              raise SystemExit('missing switch MFC write')
+
+          write('econet_eth.c', lines)
+
+          # econet_port.c
+          lines = read('econet_port.c')
+          for i, line in enumerate(lines):
+              if line.strip() == 'enum etx_fport fport;':
+                  prefix = line[:len(line) - len(line.lstrip())]
+                  lines.insert(i + 1, prefix + 'u8 switch_port;')
+                  break
+          else:
+              raise SystemExit('missing port fport field')
+          insert_after(lines, 'set_etx_fport(&msg.etx, port->fport);', [
+              TAB + 'if (port->fport == ETX_FPORT_GDM1)',
+              TAB * 2 + 'set_etx_sp_tag(&msg.etx, BIT(port->switch_port));',
+          ], 'TX special tag')
+          for i, line in enumerate(lines):
+              if line.strip() == 'bool has_g2_stats)':
+                  prefix = line[:len(line) - len(line.lstrip())]
+                  lines[i:i + 1] = [prefix + 'u8 switch_port,', prefix + 'const u8 *shared_mac,', line]
+                  break
+          else:
+              raise SystemExit('missing allocator definition')
+          insert_after(lines, 'ndev->watchdog_timeo = 5 * HZ;', [
+              TAB + 'if (fport == ETX_FPORT_GDM1 && switch_port >= 1 && switch_port <= 4)',
+              TAB * 2 + 'snprintf(ndev->name, IFNAMSIZ, "eth0.%u", switch_port);',
+          ], 'logical netdev names')
+          oi = next((i for i, l in enumerate(lines) if l.strip() == 'err = of_get_ethdev_address(np, ndev);'), None)
+          if oi is None:
+              raise SystemExit('missing MAC address lookup')
+          depth = 0
+          end = None
+          for j in range(oi, len(lines)):
+              depth += lines[j].count('{') - lines[j].count('}')
+              if j > oi and depth == 0:
+                  end = j
+                  break
+          if end is None:
+              raise SystemExit('unterminated MAC address block')
+          lines[oi:end + 1] = [
+              TAB + 'err = of_get_ethdev_address(np, ndev);',
+              TAB + 'if (err) {',
+              TAB * 2 + 'if (err == -EPROBE_DEFER)',
+              TAB * 3 + 'return ERR_PTR(err);',
+              '',
+              TAB * 2 + 'if (shared_mac)',
+              TAB * 3 + 'eth_hw_addr_set(ndev, shared_mac);',
+              TAB * 2 + 'else',
+              TAB * 3 + 'eth_hw_addr_random(ndev);',
+              '',
+              TAB * 2 + 'if (!shared_mac)',
+              TAB * 3 + f'dev_info(eth->dev, "generated random MAC address %pM{BS}n",',
+              TAB * 4 + 'ndev->dev_addr);',
+              TAB + '}',
+          ]
+          insert_after(lines, 'port->fport = fport;', [TAB + 'port->switch_port = switch_port;'], 'store switch port')
+          write('econet_port.c', lines)
+
+          # econet_qdma.c
+          lines = read('econet_qdma.c')
+          insert_after(lines, 'u32 hash;', [TAB + 'u16 sp_tag;'], 'RX special-tag variable')
+          insert_after(lines, 'sport = get_erx_sport(&desc.msg.erx);', [
+              TAB + 'sp_tag = get_erx_sp_tag(&desc.msg.erx);',
+          ], 'RX special-tag extraction')
+          replaced = False
+          for i, line in enumerate(lines):
+              if line.strip() == 'if (en75_rx_before_recv(q->qdma->eth, skb, sport))':
+                  prefix = line[:len(line) - len(line.lstrip())]
+                  lines[i] = prefix + 'if (en75_rx_before_recv(q->qdma->eth, skb, sport, sp_tag))'
+                  replaced = True
+                  break
+          if not replaced:
+              raise SystemExit('missing RX dispatch')
+          if any(line.strip() == 'if (en75_rx_before_recv(q->qdma->eth, skb, sport))' for line in lines):
+              raise SystemExit('old RX dispatch survived')
+          write('econet_qdma.c', lines)
+
+          print('source transformations verified')
+          PY
+
+          sed -i -E 's/[[:space:]]+$//' \
+            "$TMP"/econet_eth.h \
+            "$TMP"/econet_eth.c \
+            "$TMP"/econet_port.c \
+            "$TMP"/econet_qdma.c
+          git -C "$TMP" diff --check
+          git -C "$TMP" diff --no-ext-diff -- econet_eth.h econet_eth.c econet_port.c econet_qdma.c > "$PATCH_FILE"
+          test -s "$PATCH_FILE"
+          git -C "$TMP" reset --hard -q
+          git -C "$TMP" apply --check "$GITHUB_WORKSPACE/$PATCH_FILE"
+          git -C "$TMP" apply --check --whitespace=error "$GITHUB_WORKSPACE/$PATCH_FILE"
+
+          # Guard against the v5 failure: patched sources must keep balanced braces and no duplicate definitions.
+          git -C "$TMP" apply "$GITHUB_WORKSPACE/$PATCH_FILE"
+          python3 - "$TMP" <<'CHK'
+          import re, sys, collections
+          from pathlib import Path
+          root = Path(sys.argv[1])
+          for fn in ('econet_eth.c', 'econet_port.c', 'econet_qdma.c', 'econet_eth.h'):
+              t = (root / fn).read_text()
+              if t.count('{') != t.count('}'):
+                  raise SystemExit(fn + ': unbalanced braces after patch')
+          t = (root / 'econet_eth.c').read_text()
+          defs = re.findall(r'^(?:static\s+)?(?:struct\s+\w+\s*\*|[a-z0-9_]+\s+)(\w+)\([^;]*$', t, re.M)
+          dup = [k for k, v in collections.Counter(defs).items() if v > 1]
+          if dup:
+              raise SystemExit('duplicate definitions: ' + ', '.join(dup))
+          if 'int en75_port_set_macaddr' not in t:
+              raise SystemExit('en75_port_set_macaddr was removed by the patch')
+          print('patched driver sanity checks passed')
+          CHK
+          git -C "$TMP" reset --hard -q
+
+          grep -q 'EN75_NUM_GDM_PORTS' "$PATCH_FILE"
+          grep -q 'set_etx_sp_tag' "$PATCH_FILE"
+          grep -q 'get_erx_sp_tag' "$PATCH_FILE"
+          grep -q 'MT753X_WAN_PORT_MATRIX' "$PATCH_FILE"
+          grep -q '0x81008120U' "$PATCH_FILE"
+          echo 'EN751221 special-tag driver patch generated and dry-run validated.'
+
+      - name: Apply local econet-eth patches (extra)
+        shell: bash
+        run: |
+          set -eux
+          shopt -s nullglob
+          patches=(ci/patches/*.patch)
+          if [ "${#patches[@]}" -eq 0 ]; then
+            echo "No local patches in ci/patches, skipping"
+            exit 0
+          fi
+          test -d package/kernel/econet-eth
+          mkdir -p package/kernel/econet-eth/patches
+          cp -v "${patches[@]}" package/kernel/econet-eth/patches/
+
+      - name: Patch EN751221 256M DTS and PCIe
+        shell: bash
+        run: |
+          set -eux
+
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("target/linux/econet/dts/en751221_generic.dts")
+          s = p.read_text()
+
+          s = s.replace(
+              "reg = <0x00000000 0x4000000>;",
+              "reg = <0x00000000 0x10000000>;",
+              1,
+          )
+
+          s = s.replace(
+              "linux,usable-memory-range = <0x00020000 0x3fe0000>;",
+              "linux,usable-memory-range = <0x00020000 0x0ffe0000>;",
+              1,
+          )
+
+          nand = """&nand {
+              status = "okay";
+
+              /*
+               * AC1000HI EN751221:
+               * NAND = 128 MiB
+               * eraseblock = 128 KiB
+               *
+               * RAWB  = 0x075e0000
+               * BMT   = 0x07fe0000
+               * reserve = 81 eraseblocks
+               */
+              econet,bmt;
+              econet,bbt-table-size = <1000>;
+              econet,assert-reserve-size = <81>;
+
+              partitions {
+                  compatible = "fixed-partitions";
+                  #address-cells = <1>;
+                  #size-cells = <1>;
+
+                  partition@0 {
+                      label = "bootloader";
+                      reg = <0x00000000 0x00040000>;
+                      read-only;
+                  };
+
+                  partition@40000 {
+                      label = "romfile";
+                      reg = <0x00040000 0x00040000>;
+                      read-only;
+                  };
+
+                  partition@80000 {
+                      compatible = "openwrt,tclinux";
+                      label = "tclinux";
+                      reg = <0x00080000 0x01e00000>;
+                  };
+
+                  partition@1e80000 {
+                      label = "tclinux_slave";
+                      reg = <0x01e80000 0x01e00000>;
+                      read-only;
+                  };
+
+                  /* fpt_0 was empty on this unit: reused as Wi-Fi EEPROM store (writable). */
+                  fpt0: partition@3c80000 {
+                      label = "fpt_0";
+                      reg = <0x03c80000 0x00500000>;
+                  };
+
+                  partition@4180000 {
+                      label = "fpt_1";
+                      reg = <0x04180000 0x00500000>;
+                      read-only;
+                  };
+
+                  /*
+                   * Preserve recovered ROMFILE backup /
+                   * metadata / RAWB region.
+                   *
+                   * 0x04680000 -> 0x07540000
+                   * = 0x02ec0000
+                   */
+                  partition@4680000 {
+                      label = "rootfs_data";
+                      reg = <0x04680000 0x02ec0000>;
+                  };
+              };
+          };
+          """
+
+          s, count = re.subn(
+              r"&nand\s*\{.*?\n\};\n\n&gmac0",
+              nand + "\n&gmac0",
+              s,
+              count=1,
+              flags=re.S,
+          )
+
+          if count != 1:
+              raise SystemExit("Could not replace &nand block")
+
+          for n in (0, 1):
+              pattern = rf"&pcie{n}\s*\{{.*?\n\}};"
+              replacement = (
+                  f"&pcie{n} {{\n"
+                  f"    status = \"okay\";\n"
+                  f"}};"
+              )
+
+              s, count = re.subn(
+                  pattern,
+                  replacement,
+                  s,
+                  count=1,
+                  flags=re.S,
+              )
+
+              if count != 1:
+                  s += "\n" + replacement + "\n"
+
+          p.write_text(s)
+          PY
+
+          DTS="target/linux/econet/dts/en751221_generic.dts"
+
+          grep -q 'econet,bmt;' "$DTS"
+          grep -q 'econet,bbt-table-size = <1000>;' "$DTS"
+          grep -q 'econet,assert-reserve-size = <81>;' "$DTS"
+
+          grep -q 'label = "bootloader";' "$DTS"
+          grep -q 'label = "romfile";' "$DTS"
+          grep -q 'label = "tclinux";' "$DTS"
+          grep -q 'label = "tclinux_slave";' "$DTS"
+          grep -q 'label = "fpt_0";' "$DTS"
+          grep -q 'label = "fpt_1";' "$DTS"
+          grep -q 'label = "rootfs_data";' "$DTS"
+
+          grep -q 'reg = <0x00000000 0x10000000>;' "$DTS"
+          grep -q 'linux,usable-memory-range = <0x00020000 0x0ffe0000>;' "$DTS"
+
+          grep -q 'reg = <0x00080000 0x01e00000>;' "$DTS"
+          grep -q 'reg = <0x01e80000 0x01e00000>;' "$DTS"
+          grep -q 'reg = <0x03c80000 0x00500000>;' "$DTS"
+          grep -q 'reg = <0x04180000 0x00500000>;' "$DTS"
+          grep -q 'reg = <0x04680000 0x02ec0000>;' "$DTS"
+
+          grep -q '&pcie0 {' "$DTS"
+          grep -q '&pcie1 {' "$DTS"
+
+          echo "EN751221 DTS validation: OK"
+
+      - name: Configure EN751221 direct special-tag Ethernet topology
+        shell: bash
+        run: |
+          set -euxo pipefail
+          DTS='target/linux/econet/dts/en751221_generic.dts'
+          test -f "$DTS"
+
+          cat >> "$DTS" <<'EOF'
+
+          /* AC1000HI direct MT7530 special-tag mode: four logical GDM1 ports. */
+          &gmac0 {
+              status = "okay";
+          };
+
+          &gmac1 {
+              status = "okay";
+          };
+
+          &ethernet {
+              mac@2 {
+                  compatible = "econet,eth-mac";
+                  reg = <2>;
+                  status = "okay";
+                  phy-mode = "trgmii";
+              };
+
+              mac@3 {
+                  compatible = "econet,eth-mac";
+                  reg = <3>;
+                  status = "okay";
+                  phy-mode = "trgmii";
+              };
+          };
+
+          /* The direct econet-eth driver owns the on-die switch registers. */
+          &switch0 {
+              status = "disabled";
+          };
+          EOF
+
+          grep -q 'mac@2 {' "$DTS"
+          grep -q 'mac@3 {' "$DTS"
+          grep -q 'reg = <2>;' "$DTS"
+          grep -q 'reg = <3>;' "$DTS"
+          echo 'Direct special-tag Ethernet DTS overlay installed.'
+
+      - name: Add MT7615 Wi-Fi node (EEPROM read from fpt_0)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          DTS='target/linux/econet/dts/en751221_generic.dts'
+          # The MT7615 sits at 0001:01:00.0 behind root port 0001:00:01.0 on controller 1fb83000.pcie
+          # (readlink -f /sys/bus/pci/devices/0001:01:00.0 on the running router). Find its DT label
+          # instead of guessing, and fail fast if the controller is not defined.
+          PCIE_LABEL="$(grep -rhoE '[A-Za-z0-9_]+:[[:space:]]*pcie@1fb83000' target/linux/econet/dts/ | head -n1 | cut -d: -f1)"
+          test -n "$PCIE_LABEL" || { echo 'ERROR: no DT label for pcie@1fb83000'; grep -rn 'pcie' target/linux/econet/dts/ | head -20; exit 1; }
+          cat >> "$DTS" <<EOF
+
+          /* MT7615 EEPROM lives in fpt_0 at offset 0; flash it at runtime, no rebuild. */
+          &${PCIE_LABEL} {
+              pcie@1,0 {
+                  reg = <0x0800 0 0 0 0>;
+                  #address-cells = <3>;
+                  #size-cells = <2>;
+                  device_type = "pci";
+                  ranges;
+
+                  wifi@0,0 {
+                      compatible = "mediatek,mt76";
+                      reg = <0x0000 0 0 0 0>;
+                      mediatek,mtd-eeprom = <&fpt0 0x0>;
+                  };
+              };
+          };
+          EOF
+          grep -q 'mediatek,mtd-eeprom = <&fpt0 0x0>;' "$DTS"
+
+      - name: Apply external CI inputs (patches, DTS fragments, rootfs overlay)
+        shell: bash
+        run: |
+          set -euxo pipefail
+          shopt -s nullglob
+          DTS='target/linux/econet/dts/en751221_generic.dts'
+          # ci/kernel-patches/*.patch -> Linux patches for econet 6.18
+          for f in ci/kernel-patches/*.patch; do
+            cp -v "$f" target/linux/econet/patches-6.18/
+          done
+          # ci/dts.d/*.dtsi -> text appended to the DTS (e.g. "&label { ... };")
+          for f in ci/dts.d/*.dtsi; do
+            printf '\n/* from %s */\n' "$f" >> "$DTS"
+            cat "$f" >> "$DTS"
+          done
+          # ci/overlay/** -> rootfs overlay (only the image is repackaged, no kernel rebuild)
+          if [ -d ci/overlay ]; then
+            cp -a ci/overlay/. files/
+          fi
+
+      - name: Install Wi-Fi EEPROM flashing helper
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p files/usr/sbin
+          cat > files/usr/sbin/flash-wifi-eeprom <<'EOF'
+          #!/bin/sh
+          # Usage: flash-wifi-eeprom EEPROM.bin
+          # Writes the MT7615 EEPROM image into mtd "fpt_0" (read by mt76 at boot). Reboot afterwards.
+          set -eu
+          F="${1-}"
+          [ -f "$F" ] || { echo "usage: $0 EEPROM.bin" >&2; exit 2; }
+          SIZE=$(wc -c < "$F")
+          if [ "$SIZE" -lt 1024 ] || [ "$SIZE" -gt 65536 ]; then
+              echo "unexpected size: $SIZE bytes" >&2; exit 2
+          fi
+          HDR=$(hexdump -n 2 -C "$F" | head -n1 | awk '{print $2 $3}')
+          [ "$HDR" = "1576" ] || { echo "file does not start with 15 76 (MT7615), got: $HDR" >&2; exit 2; }
+          grep -q '"fpt_0"' /proc/mtd || { echo 'mtd fpt_0 not found' >&2; exit 1; }
+          mtd erase fpt_0
+          mtd write "$F" fpt_0
+          mtd verify "$F" fpt_0
+          echo "Wrote $SIZE bytes to fpt_0. Reboot to load the new EEPROM."
+          EOF
+          chmod 755 files/usr/sbin/flash-wifi-eeprom
+          sh -n files/usr/sbin/flash-wifi-eeprom
+
+      - name: Fix EN751221 kernel config
+        shell: bash
+        run: |
+          set -eux
+          CONFIG="target/linux/econet/en751221/config-6.18"
+          for line in \
+            '# CONFIG_MEDIATEK_GE_SOC_PHY is not set' \
+            'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' \
+            'CONFIG_MTD_SPLIT_TCLINUX_FW=y' \
+            'CONFIG_DEVMEM=y' \
+            '# CONFIG_STRICT_DEVMEM is not set' \
+            '# CONFIG_IO_STRICT_DEVMEM is not set'; do
+            grep -qxF "$line" "$CONFIG" || printf '%s\n' "$line" >> "$CONFIG"
+          done
+          grep -qxF 'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' "$CONFIG"
+          grep -qxF 'CONFIG_MTD_SPLIT_TCLINUX_FW=y' "$CONFIG"
+
+      - name: Add EN751221 zboot placement patch
+        shell: bash
+        run: |
+          set -eux
+          PATCH_DIR="target/linux/econet/patches-6.18"
+          PATCH_FILE="$PATCH_DIR/999-en751221-zboot-kernel-load-address.patch"
+          mkdir -p "$PATCH_DIR"
+          cat > "$PATCH_FILE" <<'PATCH'
+          --- a/arch/mips/econet/Platform
+          +++ b/arch/mips/econet/Platform
+          @@ -1,5 +1,5 @@
+           # To address a 7.2MB kernel size limit in the EcoNet SDK bootloader,
+           # we put the load address well above where the bootloader loads and then use
+           # zboot. So please set CONFIG_ZBOOT_LOAD_ADDRESS to the address where your
+           # bootloader actually places the kernel.
+          -load-$(CONFIG_ECONET)	+= 0xffffffff81000000
+          +load-$(CONFIG_ECONET)	+= 0xffffffff85000000
+          PATCH
+          grep -Fq -- '0xffffffff81000000' "$PATCH_FILE"
+          grep -Fq '0xffffffff85000000' "$PATCH_FILE"
+
+      - name: Apply AC1000HI tclinux parser
+        shell: bash
+        run: |
+          set -eux
+          mkdir -p target/linux/generic/files/drivers/mtd/mtdsplit
+
+          cat > target/linux/generic/files/drivers/mtd/mtdsplit/mtdsplit_tclinux.c <<'EOF'
+          /* SPDX-License-Identifier: GPL-2.0-only */
+          #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
+          
+          #include <linux/module.h>
+          #include <linux/slab.h>
+          #include <linux/mtd/mtd.h>
+          #include <linux/mtd/partitions.h>
+          #include <linux/byteorder/generic.h>
+          #include <linux/of.h>
+          
+          #include "mtdsplit.h"
+          
+          #define TCLINUX_HDRLEN 0x100
+          
+          struct tclinux_header {
+              u8 magic[4];
+              __be32 hdrlen;
+              __be32 total_len;
+              __be32 crc32;
+              u8 version[32];
+              u8 customer_version[32];
+              __be32 kernel_len;
+              __be32 rootfs_len;
+              __be32 romfile_len;
+              u8 model[32];
+              __be32 loadaddr;
+              u8 reserved[128];
+          } __packed;
+          
+          static int read_header(struct mtd_info *mtd, size_t offset,
+                                 struct tclinux_header *hdr)
+          {
+              size_t retlen;
+              int ret = mtd_read(mtd, offset, sizeof(*hdr), &retlen,
+                                 (u_char *)hdr);
+              if (ret)
+                  return ret;
+              if (retlen != sizeof(*hdr))
+                  return -EIO;
+              return 0;
+          }
+          
+          static int mtdsplit_parse_tclinux(struct mtd_info *master,
+                                            const struct mtd_partition **pparts,
+                                            struct mtd_part_parser_data *data)
+          {
+              const struct device_node *np = mtd_get_of_node(master);
+              struct tclinux_header hdr;
+              struct mtd_partition *parts;
+              size_t offset;
+              u32 hdrlen = 0, total_len = 0, kernel_len = 0, rootfs_len = 0;
+              u64 rootfs_offset = 0, end = 0, rootfs_size = 0;
+              int ret;
+          
+              if (!np || !of_device_is_compatible(np, "openwrt,tclinux"))
+                  return -ENOENT;
+          
+              for (offset = 0; offset + sizeof(hdr) <= master->size;
+                   offset += master->erasesize) {
+                  ret = read_header(master, offset, &hdr);
+                  if (ret)
+                      continue;
+                  if (memcmp(hdr.magic, "2RDH", 4))
+                      continue;
+          
+                  hdrlen = be32_to_cpu(hdr.hdrlen);
+                  total_len = be32_to_cpu(hdr.total_len);
+                  kernel_len = be32_to_cpu(hdr.kernel_len);
+                  rootfs_len = be32_to_cpu(hdr.rootfs_len);
+          
+                  if (hdrlen != TCLINUX_HDRLEN || !kernel_len || !rootfs_len)
+                      continue;
+          
+                  rootfs_offset = (u64)offset + hdrlen + kernel_len;
+                  end = rootfs_offset + rootfs_len;
+          
+                  if (rootfs_offset >= master->size || end > master->size)
+                      continue;
+                  if (total_len && (u64)offset + total_len > master->size)
+                      continue;
+                  break;
+              }
+          
+              if (offset >= master->size)
+                  return -ENOENT;
+          
+              /*
+               * The header carries the exact squashfs length, which is not a multiple
+               * of 512. mtdblock rounds its size down to 512-byte sectors and squashfs
+               * refuses to mount when bytes_used exceeds the block device, so round
+               * the partition up to a whole erase block (never past the master).
+               */
+              rootfs_size = min_t(u64, roundup(rootfs_len, master->erasesize),
+                                  master->size - rootfs_offset);
+
+              parts = kcalloc(2, sizeof(*parts), GFP_KERNEL);
+              if (!parts)
+                  return -ENOMEM;
+          
+              parts[0].name = KERNEL_PART_NAME;
+              parts[0].offset = offset + hdrlen;
+              parts[0].size = kernel_len;
+          
+              parts[1].name = ROOTFS_PART_NAME;
+              parts[1].offset = rootfs_offset;
+              parts[1].size = rootfs_size;
+          
+              *pparts = parts;
+              return 2;
+          }
+          
+          static const struct of_device_id tclinux_of_match[] = {
+              { .compatible = "openwrt,tclinux" },
+              {},
+          };
+          MODULE_DEVICE_TABLE(of, tclinux_of_match);
+          
+          static struct mtd_part_parser tclinux_parser = {
+              .owner = THIS_MODULE,
+              .name = "tclinux-fw",
+              .of_match_table = tclinux_of_match,
+              .parse_fn = mtdsplit_parse_tclinux,
+              .type = MTD_PARSER_TYPE_FIRMWARE,
+          };
+          
+          module_mtd_part_parser(tclinux_parser);
+          MODULE_LICENSE("GPL");
+          EOF
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          k = Path("target/linux/generic/files/drivers/mtd/mtdsplit/Kconfig")
+          s = k.read_text()
+          if "config MTD_SPLIT_TCLINUX_FW" not in s:
+              marker = "config MTD_SPLIT_TRX_FW\n"
+              insert = """config MTD_SPLIT_TCLINUX_FW
+          \tbool "EcoNet tclinux (2RDH) firmware parser"
+          \tdepends on MTD_SPLIT_SUPPORT
+          \tselect MTD_SPLIT
+
+          """
+              if marker not in s:
+                  raise SystemExit("mtdsplit Kconfig marker not found")
+              k.write_text(s.replace(marker, insert + marker, 1))
+
+          m = Path("target/linux/generic/files/drivers/mtd/mtdsplit/Makefile")
+          s = m.read_text()
+          line = "obj-$(CONFIG_MTD_SPLIT_TCLINUX_FW) += mtdsplit_tclinux.o\n"
+          if line not in s:
+              marker = "obj-$(CONFIG_MTD_SPLIT_TRX_FW) += mtdsplit_trx.o\n"
+              if marker not in s:
+                  raise SystemExit("mtdsplit Makefile marker not found")
+              m.write_text(s.replace(marker, marker + line, 1))
+          PY
+
+          test -s target/linux/generic/files/drivers/mtd/mtdsplit/mtdsplit_tclinux.c
+          grep -q 'config MTD_SPLIT_TCLINUX_FW' target/linux/generic/files/drivers/mtd/mtdsplit/Kconfig
+          grep -qxF 'obj-$(CONFIG_MTD_SPLIT_TCLINUX_FW) += mtdsplit_tclinux.o' target/linux/generic/files/drivers/mtd/mtdsplit/Makefile
+
+      - name: Configure AC1000HI tclinux image
+        shell: bash
+        run: |
+          set -eux
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          p = Path("target/linux/econet/image/en751221.mk")
+          s = p.read_text()
+
+          new = """define Device/en751221_generic
+            DEVICE_VENDOR := FPT
+            DEVICE_MODEL := AC1000HI
+            DEVICE_TITLE := AC1000HI OpenWrt
+            DEVICE_DESCRIPTION := OpenWrt NAND/TRX image for EcoNet EN751221 AC1000HI
+            DEVICE_DTS := en751221_generic
+            KERNEL_INITRAMFS := kernel-bin | append-dtb
+            IMAGES := tclinux.trx
+            IMAGE/tclinux.trx := append-kernel | lzma | tclinux-trx
+          endef
+          TARGET_DEVICES += en751221_generic
+          """
+
+          pattern = r"define Device/en751221_generic\n.*?^TARGET_DEVICES \+= en751221_generic\n"
+          s2, count = re.subn(pattern, new, s, count=1, flags=re.S | re.M)
+          if count != 1:
+              raise SystemExit("Could not locate Device/en751221_generic block")
+          p.write_text(s2)
+          PY
+          grep -q 'IMAGE/tclinux.trx := append-kernel | lzma | tclinux-trx' target/linux/econet/image/en751221.mk
+
+      - name: Install AC1000HI access-control files
+        shell: bash
+        run: |
+          set -eux
+          mkdir -p files/etc/config files/etc/crontabs files/usr/sbin files/usr/lib/opennds
+
+          cat > files/etc/config/opennds <<'EOF'
+          config opennds 'setup'
+              option enabled '1'
+              option gatewayinterface 'br-lan'
+              option gatewayport '2050'
+              option login_option_enabled '3'
+              option themespec_path '/usr/lib/opennds/ac1000hi-token.sh'
+              option fwhook_enabled '1'
+              option allow_preemptive_authentication '0'
+              option debuglevel '1'
+          EOF
+
+          cat > files/etc/crontabs/root <<'EOF'
+          0 * * * * /usr/sbin/accessctl gc >/dev/null 2>&1
+          EOF
+
+          cat > files/usr/sbin/accessctl <<'ACCESSCTL_EOF'
+          #!/bin/sh
+          set -eu
+          umask 077
+          
+          DB=/etc/accessctl/tokens.db
+          LOCK=/etc/accessctl/.lock
+          DIR=/etc/accessctl
+          
+          init_db() {
+              mkdir -p "$DIR"
+              [ -e "$DB" ] || : > "$DB"
+              chmod 600 "$DB"
+          }
+          
+          now_utc() { date -u +%s; }
+          
+          token_hash() {
+              printf '%s' "$1" | sha256sum | awk '{print $1}'
+          }
+          
+          gen_token() {
+              head -c 32 /dev/urandom | base64 | tr -d '\r\n=' | tr '+/' '-_'
+          }
+          
+          lock() {
+              while ! mkdir "$LOCK" 2>/dev/null; do sleep 1; done
+              trap 'rmdir "$LOCK" 2>/dev/null || true' EXIT INT TERM
+          }
+          
+          unlock() {
+              trap - EXIT INT TERM
+              rmdir "$LOCK" 2>/dev/null || true
+          }
+          
+          expiry_text() {
+              case "$1" in
+                  0) printf '%s' 'NEVER' ;;
+                  *) date -u -d "@$1" '+%Y-%m-%dT%H:%M:%SZ' 2>/dev/null || printf '%s' "$1" ;;
+              esac
+          }
+          
+          safe_name() {
+              printf '%s' "$1" | tr '\r\n|' '   ' | cut -c1-80
+          }
+          
+          create_user() {
+              name=$1
+              days=$2
+              case "$days" in ''|*[!0-9]*|0) echo 'days must be a positive integer' >&2; exit 2;; esac
+              init_db
+              lock
+              token=$(gen_token)
+              hash=$(token_hash "$token")
+              created=$(now_utc)
+              expires=$((created + days * 86400))
+              id=$(printf '%s' "$hash" | cut -c1-12)
+              name=$(safe_name "$name")
+              printf '%s|user|%s|%s|%s|%s\n' "$id" "$name" "$hash" "$created" "$expires" >> "$DB"
+              unlock
+              printf 'Name: %s\nID: %s\nExpires: %s\nToken: %s\n' "$name" "$id" "$(expiry_text "$expires")" "$token"
+          }
+          
+          create_master() {
+              init_db
+              lock
+              if grep -q '^.*|master|' "$DB"; then
+                  unlock
+                  echo 'Master token already exists; use master rotate.' >&2
+                  exit 3
+              fi
+              token=$(gen_token)
+              hash=$(token_hash "$token")
+              id=$(printf '%s' "$hash" | cut -c1-12)
+              created=$(now_utc)
+              printf '%s|master|MASTER|%s|%s|0\n' "$id" "$hash" "$created" >> "$DB"
+              unlock
+              printf 'Type: MASTER\nID: %s\nExpires: NEVER\nToken: %s\n' "$id" "$token"
+          }
+          
+          revoke_match() {
+              key=$1
+              init_db
+              lock
+              tmp=$(mktemp "$DIR/.tokens.XXXXXX")
+              awk -F'|' -v k="$key" '($1 != k && $3 != k) {print}' "$DB" > "$tmp"
+              if cmp -s "$DB" "$tmp"; then
+                  rm -f "$tmp"
+                  unlock
+                  echo 'Token not found.' >&2
+                  exit 4
+              fi
+              mv "$tmp" "$DB"
+              chmod 600 "$DB"
+              unlock
+              echo 'Token revoked/deleted.'
+          }
+          
+          renew() {
+              id=$1
+              days=$2
+              case "$days" in ''|*[!0-9]*|0) echo 'days must be a positive integer' >&2; exit 2;; esac
+              init_db
+              lock
+              now=$(now_utc)
+              expires=$((now + days * 86400))
+              tmp=$(mktemp "$DIR/.tokens.XXXXXX")
+              found=0
+              while IFS='|' read -r rid type name hash created oldexp; do
+                  [ -n "$rid" ] || continue
+                  if [ "$rid" = "$id" ] && [ "$type" = user ]; then
+                      printf '%s|%s|%s|%s|%s|%s\n' "$rid" "$type" "$name" "$hash" "$created" "$expires" >> "$tmp"
+                      found=1
+                  else
+                      printf '%s|%s|%s|%s|%s|%s\n' "$rid" "$type" "$name" "$hash" "$created" "$oldexp" >> "$tmp"
+                  fi
+              done < "$DB"
+              if [ "$found" -eq 0 ]; then
+                  rm -f "$tmp"
+                  unlock
+                  echo 'User token not found.' >&2
+                  exit 4
+              fi
+              mv "$tmp" "$DB"
+              chmod 600 "$DB"
+              unlock
+              printf 'ID: %s\nNew expiry: %s\n' "$id" "$(expiry_text "$expires")"
+          }
+          
+          gc() {
+              init_db
+              now=$(now_utc)
+              [ "$now" -gt 1577836800 ] || exit 0
+              lock
+              tmp=$(mktemp "$DIR/.tokens.XXXXXX")
+              removed=0
+              while IFS='|' read -r id type name hash created expires; do
+                  [ -n "$id" ] || continue
+                  if [ "$type" = user ] && [ "$expires" -gt 0 ] 2>/dev/null && [ "$now" -ge "$expires" ]; then
+                      removed=$((removed + 1))
+                  else
+                      printf '%s|%s|%s|%s|%s|%s\n' "$id" "$type" "$name" "$hash" "$created" "$expires" >> "$tmp"
+                  fi
+              done < "$DB"
+              mv "$tmp" "$DB"
+              chmod 600 "$DB"
+              unlock
+              [ "$removed" -eq 0 ] || logger -t accessctl "removed $removed expired token(s)"
+          }
+          
+          check_token() {
+              tok=$1
+              init_db
+              now=$(now_utc)
+              hash=$(token_hash "$tok")
+              match=$(awk -F'|' -v h="$hash" '$4==h {print; exit}' "$DB" || true)
+              [ -n "$match" ] || exit 1
+              IFS='|' read -r id type name thash created expires <<EOF
+          $match
+          EOF
+              if [ "$type" = user ] && [ "$expires" -gt 0 ] && [ "$now" -ge "$expires" ]; then
+                  revoke_match "$id" >/dev/null
+                  exit 1
+              fi
+              printf '%s|%s|%s\n' "$type" "$id" "$name"
+          }
+          
+          list_tokens() {
+              init_db
+              printf '%-14s %-8s %-24s %s\n' ID TYPE NAME EXPIRES
+              while IFS='|' read -r id type name hash created expires; do
+                  [ -n "$id" ] || continue
+                  printf '%-14s %-8s %-24s %s\n' "$id" "$type" "$name" "$(expiry_text "$expires")"
+              done < "$DB"
+          }
+          
+          usage() {
+              echo 'Usage:'
+              echo '  accessctl create --name NAME --days DAYS'
+              echo '  accessctl list'
+              echo '  accessctl check TOKEN'
+              echo '  accessctl revoke ID|NAME'
+              echo '  accessctl renew ID --days DAYS'
+              echo '  accessctl master create|rotate|revoke'
+              echo '  accessctl gc'
+          }
+          
+          init_db
+          case "${1-}" in
+              create)
+                  [ "${2-}" = --name ] && [ -n "${3-}" ] && [ "${4-}" = --days ] && [ -n "${5-}" ] || { usage >&2; exit 2; }
+                  create_user "$3" "$5"
+                  ;;
+              list) list_tokens ;;
+              check) [ -n "${2-}" ] || exit 2; check_token "$2" ;;
+              revoke) [ -n "${2-}" ] || exit 2; revoke_match "$2" ;;
+              renew)
+                  [ -n "${2-}" ] && [ "${3-}" = --days ] && [ -n "${4-}" ] || { usage >&2; exit 2; }
+                  renew "$2" "$4"
+                  ;;
+              master)
+                  case "${2-}" in
+                      create) create_master ;;
+                      rotate)
+                          init_db
+                          lock
+                          tmp=$(mktemp "$DIR/.tokens.XXXXXX")
+                          awk -F'|' '$2 != "master" {print}' "$DB" > "$tmp"
+                          mv "$tmp" "$DB"
+                          chmod 600 "$DB"
+                          unlock
+                          create_master
+                          ;;
+                      revoke)
+                          if grep -q '^.*|master|' "$DB"; then revoke_match MASTER; else echo 'No master token.'; fi
+                          ;;
+                      *) usage >&2; exit 2;;
+                  esac
+                  ;;
+              gc) gc ;;
+              *) usage >&2; exit 2 ;;
+          esac
+          ACCESSCTL_EOF
+
+          cat > files/usr/lib/opennds/ac1000hi-token.sh <<'EOF'
+          #!/bin/sh
+          
+          title="AC1000HI Network Access"
+          randquery="$(date +%s | sha256sum | awk '{print $1}')"
+          
+          sessiontimeout="60"
+          upload_rate="10000"
+          download_rate="10000"
+          upload_quota="0"
+          download_quota="0"
+          quotas="$sessiontimeout $upload_rate $download_rate $upload_quota $download_quota"
+          
+          additionalthemevars="token mode"
+          fasvarlist="$fasvarlist $additionalthemevars"
+          userinfo="$title"
+          
+          page_header() {
+              echo '<!doctype html><html><head>'
+              echo '<meta name="viewport" content="width=device-width,initial-scale=1">'
+              echo '<meta http-equiv="Cache-Control" content="no-store">'
+              echo '<title>AC1000HI Wi-Fi</title></head><body>'
+              echo '<div style="max-width:520px;margin:30px auto;font-family:sans-serif;text-align:center">'
+              echo '<h2>AC1000HI Wi-Fi</h2>'
+          }
+          
+          page_footer() {
+              echo '</div></body></html>'
+              exit 0
+          }
+          
+          login_page() {
+              page_header
+              if [ "${error-}" = 1 ]; then
+                  echo '<p><b>Token không hợp lệ hoặc đã hết hạn.</b></p>'
+              fi
+              echo '<p>Không có token: vẫn dùng Internet được, tốc độ tối đa 10 Mbps.</p>'
+              echo '<form id="tokenform" action="/opennds_preauth/" method="get">'
+              echo "<input type=hidden name=fas value=\"$fas\">"
+              echo '<input type=hidden name=mode value="token">'
+              echo '<input id="token" name="token" type="text" inputmode="text" autocomplete="one-time-code" placeholder="Token full speed" style="width:100%;box-sizing:border-box;padding:12px">'
+              echo '<button type="submit" style="margin:12px;padding:10px 20px">Full speed</button></form>'
+              echo '<form action="/opennds_preauth/" method="get">'
+              echo "<input type=hidden name=fas value=\"$fas\">"
+              echo '<input type=hidden name=mode value="guest">'
+              echo '<button type="submit" style="padding:10px 20px">Tiếp tục 10 Mbps</button></form>'
+              if [ "${error-}" != 1 ]; then
+                  echo '<script>'
+                  echo '(()=>{const m=document.cookie.match(/(?:^|; )ac1000hi_token=([^;]+)/);if(m){document.getElementById("token").value=decodeURIComponent(m[1]);document.getElementById("tokenform").submit();}})();'
+                  echo '</script>'
+              fi
+              page_footer
+          }
+          
+          success_page() {
+              kind=$1
+              cookie_age=2592000
+              [ "$kind" = master ] && cookie_age=315360000
+              page_header
+              case "$kind" in
+                  full) echo '<h3>Full speed enabled</h3><p>Token hợp lệ.</p>' ;;
+                  master) echo '<h3>Full speed enabled</h3><p>Master token hợp lệ.</p>' ;;
+                  guest) echo '<h3>Guest access</h3><p>Tốc độ giới hạn 10 Mbps.</p>' ;;
+              esac
+              if [ "$kind" = full ] || [ "$kind" = master ]; then
+                  printf '<script>document.cookie="ac1000hi_token=%s; Max-Age=%s; Path=/; SameSite=Lax";</script>\n' "$token" "$cookie_age"
+              fi
+              echo "<p><a href=\"http://$gatewayfqdn/?$randquery\">Continue</a></p>"
+              page_footer
+          }
+          
+          do_auth() {
+              quotas="$sessiontimeout $upload_rate $download_rate $upload_quota $download_quota"
+              auth_log
+          }
+          
+          generate_splash_sequence() {
+              case "${mode-}" in
+                  token)
+                      if result=$(/usr/sbin/accessctl check "$token" 2>/dev/null); then
+                          type=$(printf '%s' "$result" | cut -d'|' -f1)
+                          sessiontimeout="60"
+                          upload_rate="0"
+                          download_rate="0"
+                          do_auth
+                          [ "$type" = master ] && success_page master
+                          success_page full
+                      fi
+                      error=1
+                      login_page
+                      ;;
+                  guest)
+                      sessiontimeout="60"
+                      upload_rate="10000"
+                      download_rate="10000"
+                      do_auth
+                      success_page guest
+                      ;;
+                  *)
+                      login_page
+                      ;;
+              esac
+          }
+          EOF
+
+          chmod 700 files/usr/sbin/accessctl files/usr/lib/opennds/ac1000hi-token.sh
+          test -x files/usr/sbin/accessctl
+          test -x files/usr/lib/opennds/ac1000hi-token.sh
+          test -f files/etc/config/opennds
+
+      - name: Install special-tag network defaults
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p files/etc/uci-defaults
+          cat > files/etc/uci-defaults/99-en751221-network <<'EOF'
+          #!/bin/sh
+          set -e
+          # econet-eth special-tag driver exposes physical switch ports as eth0.1..eth0.4.
+          # LAN1 / switch port 1 is WAN; LAN2..LAN4 + Wi-Fi remain LAN/management.
+          uci -q get network.wan >/dev/null 2>&1 || uci set network.wan='interface'
+          uci set network.wan.device='eth0.1'
+          uci set network.wan.proto='dhcp'
+          uci -q get network.lan >/dev/null 2>&1 || uci set network.lan='interface'
+          uci set network.lan.device='br-lan'
+          if ! uci -q get network.br_lan >/dev/null 2>&1; then
+              uci set network.br_lan='device'
+              uci set network.br_lan.name='br-lan'
+              uci set network.br_lan.type='bridge'
+          fi
+          uci -q delete network.br_lan.ports || true
+          for dev in eth0.2 eth0.3 eth0.4; do
+              uci add_list network.br_lan.ports="$dev"
+          done
+          uci commit network
+          exit 0
+          EOF
+          chmod 755 files/etc/uci-defaults/99-en751221-network
+
+      - name: Validate special-tag topology
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ! grep -R -nE 'eth0\.(101|102|103|104)|100-econet-eth-lan-split|lan-split' package/kernel/econet-eth files target/linux/econet 2>/dev/null
+          test -s package/kernel/econet-eth/patches/990-en751221-mtk-special-tag-four-ports.patch
+          grep -q 'set_etx_sp_tag' package/kernel/econet-eth/patches/990-en751221-mtk-special-tag-four-ports.patch
+          grep -q 'get_erx_sp_tag' package/kernel/econet-eth/patches/990-en751221-mtk-special-tag-four-ports.patch
+          grep -q 'eth0.1' files/etc/uci-defaults/99-en751221-network
+          grep -q 'eth0.4' files/etc/uci-defaults/99-en751221-network
+          grep -q 'mac@2' target/linux/econet/dts/en751221_generic.dts
+          grep -q 'mac@3' target/linux/econet/dts/en751221_generic.dts
+
+      - name: Configure EN751221 FULL image
+        shell: bash
+        run: |
+          set -eux
+          cat > .config <<'EOF'
+          CONFIG_TARGET_econet=y
+          CONFIG_TARGET_econet_en751221=y
+          CONFIG_TARGET_econet_en751221_DEVICE_en751221_generic=y
+          CONFIG_TARGET_ROOTFS_INITRAMFS=y
+          CONFIG_KERNEL_MEDIATEK_GE_SOC_PHY=n
+          CONFIG_USE_APK=y
+          CONFIG_PACKAGE_apk-mbedtls=y
+          CONFIG_BUSYBOX_CUSTOM=y
+          CONFIG_BUSYBOX_CONFIG_DEVMEM=y
+
+          CONFIG_PACKAGE_base-files=y
+          CONFIG_PACKAGE_netifd=y
+          CONFIG_PACKAGE_ethtool-full=y
+          CONFIG_PACKAGE_pciutils=y
+          CONFIG_PACKAGE_mdio-tools=y
+          CONFIG_PACKAGE_ip-full=y
+          CONFIG_PACKAGE_ip-bridge=y
+
+          CONFIG_PACKAGE_dnsmasq-full=y
+          CONFIG_PACKAGE_firewall4=y
+          CONFIG_PACKAGE_nftables-json=y
+          CONFIG_PACKAGE_odhcpd=y
+          CONFIG_PACKAGE_odhcp6c=y
+
+          CONFIG_PACKAGE_ppp=y
+          CONFIG_PACKAGE_ppp-mod-pppoe=y
+          CONFIG_PACKAGE_kmod-pppoe=y
+
+          CONFIG_PACKAGE_kmod-wireguard=y
+          CONFIG_PACKAGE_wireguard-tools=y
+          CONFIG_PACKAGE_luci-proto-wireguard=y
+
+          CONFIG_PACKAGE_kmod-mt76-core=y
+          CONFIG_PACKAGE_kmod-mt7615-common=y
+          CONFIG_PACKAGE_kmod-mt7615e=y
+          CONFIG_PACKAGE_kmod-mt7615-firmware=y
+          CONFIG_PACKAGE_wpad-basic-mbedtls=y
+          CONFIG_PACKAGE_iw=y
+          CONFIG_PACKAGE_iwinfo=y
+          CONFIG_PACKAGE_hostapd-utils=y
+
+          CONFIG_PACKAGE_kmod-usb-core=y
+          CONFIG_PACKAGE_kmod-usb2=y
+          CONFIG_PACKAGE_kmod-usb3=y
+          CONFIG_PACKAGE_kmod-usb-storage=y
+          CONFIG_PACKAGE_kmod-usb-storage-uas=y
+          CONFIG_PACKAGE_kmod-scsi-core=y
+          CONFIG_PACKAGE_usbutils=y
+
+          CONFIG_PACKAGE_kmod-fs-ext4=y
+          CONFIG_PACKAGE_kmod-fs-vfat=y
+          CONFIG_PACKAGE_kmod-fs-ntfs3=y
+          CONFIG_PACKAGE_kmod-fs-exfat=y
+
+          CONFIG_PACKAGE_i2c-tools=y
+          CONFIG_PACKAGE_kmod-i2c-dev=y
+          CONFIG_PACKAGE_gpiod-tools=y
+          CONFIG_PACKAGE_kmod-gpio-button-hotplug=y
+          CONFIG_PACKAGE_kmod-leds-gpio=y
+
+          CONFIG_PACKAGE_kmod-nf-conntrack=y
+          CONFIG_PACKAGE_kmod-nf-nat=y
+          CONFIG_PACKAGE_kmod-nf-nat6=y
+          CONFIG_PACKAGE_kmod-nf-reject=y
+          CONFIG_PACKAGE_kmod-nf-reject6=y
+          CONFIG_PACKAGE_kmod-tun=y
+
+          CONFIG_PACKAGE_luci=y
+          CONFIG_PACKAGE_luci-ssl-openssl=y
+          CONFIG_PACKAGE_luci-i18n-base-vi=y
+          CONFIG_PACKAGE_luci-base=y
+          CONFIG_PACKAGE_luci-light=y
+          CONFIG_PACKAGE_luci-mod-network=y
+          CONFIG_PACKAGE_luci-mod-status=y
+          CONFIG_PACKAGE_luci-mod-system=y
+          CONFIG_PACKAGE_luci-theme-bootstrap=y
+          CONFIG_PACKAGE_luci-app-firewall=y
+          CONFIG_PACKAGE_luci-app-package-manager=y
+          CONFIG_PACKAGE_luci-app-uhttpd=y
+          CONFIG_PACKAGE_luci-app-attendedsysupgrade=y
+          CONFIG_PACKAGE_luci-proto-ipv6=y
+          CONFIG_PACKAGE_luci-proto-ppp=y
+          CONFIG_PACKAGE_luci-app-sqm=y
+          CONFIG_PACKAGE_sqm-scripts=y
+          CONFIG_PACKAGE_kmod-sched-cake=y
+          CONFIG_PACKAGE_luci-app-nlbwmon=y
+          CONFIG_PACKAGE_nlbwmon=y
+          CONFIG_PACKAGE_luci-app-statistics=y
+          CONFIG_PACKAGE_collectd=y
+          CONFIG_PACKAGE_luci-app-adblock=y
+          CONFIG_PACKAGE_adblock=y
+          CONFIG_PACKAGE_luci-app-ksmbd=y
+          CONFIG_PACKAGE_ksmbd-server=y
+
+          CONFIG_PACKAGE_luci-i18n-firewall-vi=y
+          CONFIG_PACKAGE_luci-i18n-package-manager-vi=y
+          CONFIG_PACKAGE_luci-i18n-uhttpd-vi=y
+          CONFIG_PACKAGE_luci-i18n-attendedsysupgrade-vi=y
+          CONFIG_PACKAGE_luci-i18n-sqm-vi=y
+          CONFIG_PACKAGE_luci-i18n-nlbwmon-vi=y
+          CONFIG_PACKAGE_luci-i18n-statistics-vi=y
+          CONFIG_PACKAGE_luci-i18n-adblock-vi=y
+          CONFIG_PACKAGE_luci-i18n-ksmbd-vi=y
+
+          CONFIG_PACKAGE_rpcd=y
+          CONFIG_PACKAGE_rpcd-mod-file=y
+          CONFIG_PACKAGE_rpcd-mod-iwinfo=y
+          CONFIG_PACKAGE_rpcd-mod-luci=y
+          CONFIG_PACKAGE_rpcd-mod-ucode=y
+
+          CONFIG_PACKAGE_uhttpd=y
+          CONFIG_PACKAGE_uhttpd-mod-ubus=y
+          CONFIG_PACKAGE_uhttpd-mod-ucode=y
+
+          CONFIG_PACKAGE_mtd=y
+          CONFIG_PACKAGE_nand-utils=y
+          CONFIG_PACKAGE_ubi-utils=y
+          CONFIG_PACKAGE_block-mount=y
+          CONFIG_PACKAGE_e2fsprogs=y
+          CONFIG_PACKAGE_fdisk=y
+          CONFIG_PACKAGE_mount-utils=y
+
+          CONFIG_PACKAGE_dropbear=y
+          CONFIG_PACKAGE_zoneinfo-asia=y
+          CONFIG_PACKAGE_tcpdump=y
+          CONFIG_PACKAGE_strace=y
+          CONFIG_PACKAGE_curl=y
+          CONFIG_PACKAGE_wget-ssl=y
+          CONFIG_PACKAGE_iperf3=y
+          CONFIG_PACKAGE_htop=y
+          CONFIG_PACKAGE_btop=y
+          CONFIG_PACKAGE_nano=y
+          CONFIG_PACKAGE_lsof=y
+          CONFIG_PACKAGE_socat=y
+          CONFIG_PACKAGE_procps-ng=y
+          CONFIG_PACKAGE_tree=y
+          CONFIG_PACKAGE_logrotate=y
+          CONFIG_PACKAGE_jq=y
+          CONFIG_PACKAGE_minicom=y
+          CONFIG_PACKAGE_gdbserver=y
+
+          CONFIG_PACKAGE_opennds=y
+          CONFIG_PACKAGE_kmod-econet-eth=y
+          EOF
+
+          make defconfig
+
+
+          # Linux 6.18: kmod-iptables and kmod-nf-ipt both ship ip_tables.ko/x_tables.ko,
+          # so selecting kmod-ipt-core (iptables-legacy) breaks rootfs install with
+          # check_data_file_clashes. This image uses nftables/firewall4 only.
+          if grep -Eq '^CONFIG_PACKAGE_(kmod-ipt-core|kmod-nf-ipt|kmod-iptables)=[ym]' .config; then
+            echo 'ERROR: legacy iptables kmods selected; they clash on kernel 6.18'
+            grep -E '^CONFIG_PACKAGE_(kmod-ipt-core|kmod-nf-ipt|kmod-iptables)=' .config
+            exit 1
+          fi
+          grep -qxF 'CONFIG_PACKAGE_opennds=y' .config
+          grep -qxF 'CONFIG_USE_APK=y' .config
+          grep -qxF 'CONFIG_PACKAGE_apk-mbedtls=y' .config
+          ! grep -q '^CONFIG_PACKAGE_opkg=[ym]' .config
+          grep -q 'parts\[1\].size = rootfs_size;' target/linux/generic/files/drivers/mtd/mtdsplit/mtdsplit_tclinux.c
+          echo "=== Selected device profile(s) in .config ==="
+          grep -E '^CONFIG_TARGET_(DEVICE_)?econet_en751221_DEVICE_|^CONFIG_TARGET_MULTI_PROFILE|^CONFIG_TARGET_ALL_PROFILES|^CONFIG_IB=' .config || true
+          grep -qxF 'CONFIG_TARGET_econet_en751221_DEVICE_en751221_generic=y' .config
+          test "$(grep -cE '^CONFIG_TARGET_(DEVICE_)?econet_en751221_DEVICE_.*=y' .config)" -eq 1
+          grep -qxF 'CONFIG_MTD_SPLIT_TCLINUX_FW=y' target/linux/econet/en751221/config-6.18
+          grep -qxF 'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' target/linux/econet/en751221/config-6.18
+          test -f target/linux/generic/files/drivers/mtd/mtdsplit/mtdsplit_tclinux.c
+ 
+
+      - name: Calculate build cache key
+        shell: bash
+        run: |
+          set -eux
+          BUILD_HASH="$(
+            {
+              sha256sum .config
+              sha256sum feeds.conf.default
+              sha256sum target/linux/econet/dts/en751221_generic.dts
+              sha256sum target/linux/econet/en751221/config-6.18
+              sha256sum target/linux/econet/patches-6.18/999-en751221-zboot-kernel-load-address.patch
+              sha256sum target/linux/econet/image/en751221.mk
+              sha256sum target/linux/generic/files/drivers/mtd/mtdsplit/mtdsplit_tclinux.c
+              sha256sum target/linux/generic/files/drivers/mtd/mtdsplit/Kconfig
+              sha256sum target/linux/generic/files/drivers/mtd/mtdsplit/Makefile
+              sha256sum files/usr/sbin/accessctl
+              sha256sum files/usr/lib/opennds/ac1000hi-token.sh
+              sha256sum files/etc/config/opennds
+              sha256sum files/etc/crontabs/root
+              sha256sum files/etc/uci-defaults/99-en751221-network
+              cat ci/kernel-patches/*.patch ci/dts.d/*.dtsi 2>/dev/null | sha256sum || true
+              sha256sum package/kernel/econet-eth/patches/990-en751221-mtk-special-tag-four-ports.patch
+              cat ci/patches/*.patch 2>/dev/null | sha256sum || true
+              printf '%s\n' 'ECONET_ETH_REV=3ba0abe30cfa0dc1e76e41218140bc061be131fb'
+              printf '%s\n' 'AC1000HI_RELEASE_STACK=v6-specialtag-apk-fixed-driver-patch'
+              printf '%s\n' 'EN751221_ZBOOT_KERNEL_LOAD=0x85000000'
+              printf '%s\n' 'AC1000HI_NAND_SIZE=0x08000000'
+              printf '%s\n' 'AC1000HI_NAND_ERASEBLOCK=0x20000'
+              printf '%s\n' 'AC1000HI_NAND_RESERVE_BLOCKS=81'
+              printf '%s\n' 'AC1000HI_NAND_RAWB=0x075e0000'
+              printf '%s\n' 'AC1000HI_NAND_BMT=0x07fe0000'
+            } | sha256sum | cut -d' ' -f1
+          )"
+          BUILD_CACHE_KEY="${{ runner.os }}-openwrt-en751221-ac1000hi-v5-${OPENWRT_REV}-${FEEDS_REV_HASH}-${BUILD_HASH}"
+          echo "BUILD_HASH=$BUILD_HASH" >> "$GITHUB_ENV"
+          echo "BUILD_CACHE_KEY=$BUILD_CACHE_KEY" >> "$GITHUB_ENV"
+          echo "$BUILD_CACHE_KEY"
+
+      - name: Restore OpenWrt build tree
+        id: restore-build-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build_dir
+            staging_dir
+          key: ${{ env.BUILD_CACHE_KEY }}
+          restore-keys: |
+            ${{ runner.os }}-openwrt-en751221-ac1000hi-v5-${{ env.OPENWRT_REV }}-${{ env.FEEDS_REV_HASH }}-
+
+      - name: Prepare and verify EN751221 zboot placement
+        shell: bash
+        run: |
+          set -eux
+
+          echo "=== Build tools and toolchain ==="
+          make -j$(($(nproc)+1)) tools/install toolchain/install
+
+          if [ -n "${{ steps.restore-build-cache.outputs.cache-matched-key }}" ] && [ "${{ steps.restore-build-cache.outputs.cache-hit }}" != "true" ]; then
+            echo "Fallback cache restored: forcing kernel re-prepare so DTS/patch changes apply"
+            make target/linux/clean
+          fi
+
+          echo "=== Prepare kernel source ==="
+          make target/linux/prepare V=s
+
+          echo "=== Generate kernel config ==="
+          # kernel_oldconfig REWRITES target/linux/econet/en751221/config-6.18,
+          # which drops the lines added by "Fix EN751221 kernel config".
+          # Back it up and restore it afterwards so the real build still has them.
+          CONFIG_6_18="target/linux/econet/en751221/config-6.18"
+          cp "$CONFIG_6_18" /tmp/config-6.18.bak
+          yes "" | make kernel_oldconfig V=s || true
+          cp /tmp/config-6.18.bak "$CONFIG_6_18"
+          grep -qxF '# CONFIG_MEDIATEK_GE_SOC_PHY is not set' "$CONFIG_6_18"
+          grep -qxF 'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' "$CONFIG_6_18"
+          grep -qxF 'CONFIG_MTD_SPLIT_TCLINUX_FW=y' "$CONFIG_6_18"
+
+          echo "=== Final kernel config ==="
+
+          KERNEL_CONFIG="$(
+            find build_dir/target-*/linux-econet_en751221/linux-*/ \
+              -maxdepth 1 \
+              -name .config \
+              -type f \
+              -print |
+              head -n 1
+          )"
+
+          test -n "$KERNEL_CONFIG"
+          test -f "$KERNEL_CONFIG"
+
+          grep -qxF 'CONFIG_MTD_SPLIT_TCLINUX_FW=y' "$KERNEL_CONFIG"
+          grep -qxF 'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' "$KERNEL_CONFIG"
+
+          echo "Kernel config: $KERNEL_CONFIG"
+
+          PLATFORM_FILE="$(find build_dir -type f -path '*/arch/mips/econet/Platform' -print | head -n 1)"
+          test -n "$PLATFORM_FILE"
+          grep -Fq 'load-$(CONFIG_ECONET)' "$PLATFORM_FILE"
+          grep -Fq '0xffffffff85000000' "$PLATFORM_FILE"
+
+          if grep -Fq '0xffffffff81000000' "$PLATFORM_FILE"; then
+            echo "ERROR: old 0x81000000 load address is still present."
+            exit 1
+          fi
+
+          echo "ZBOOT wrapper load address = 0x80020000"
+          echo "Linux kernel load/link address = 0x85000000"
+
+      - name: Pre-build final validation
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          DTS="target/linux/econet/dts/en751221_generic.dts"
+          CONFIG="target/linux/econet/en751221/config-6.18"
+          IMAGE_MK="target/linux/econet/image/en751221.mk"
+
+          test -f "$DTS"
+          test -f "$CONFIG"
+          test -f "$IMAGE_MK"
+
+          echo "=== Memory ==="
+
+          grep -qF \
+            'reg = <0x00000000 0x10000000>;' \
+            "$DTS"
+
+          grep -qF \
+            'linux,usable-memory-range = <0x00020000 0x0ffe0000>;' \
+            "$DTS"
+
+          echo "=== NAND/BMT ==="
+
+          grep -qF \
+            'econet,bmt;' \
+            "$DTS"
+
+          grep -qF \
+            'econet,bbt-table-size = <1000>;' \
+            "$DTS"
+
+          grep -qF \
+            'econet,assert-reserve-size = <81>;' \
+            "$DTS"
+
+          echo "=== Vendor NAND layout ==="
+
+          grep -q \
+            'reg = <0x00080000 0x01e00000>;' \
+            "$DTS"
+
+          grep -q \
+            'reg = <0x01e80000 0x01e00000>;' \
+            "$DTS"
+
+          grep -q \
+            'reg = <0x03c80000 0x00500000>;' \
+            "$DTS"
+
+          grep -q \
+            'reg = <0x04180000 0x00500000>;' \
+            "$DTS"
+
+          grep -q \
+            'reg = <0x04680000 0x02ec0000>;' \
+            "$DTS"
+
+          echo "=== zboot ==="
+
+          grep -qxF \
+            'CONFIG_ZBOOT_LOAD_ADDRESS=0x80020000' \
+            "$CONFIG"
+
+          echo "=== tclinux parser ==="
+
+          grep -qxF \
+            'CONFIG_MTD_SPLIT_TCLINUX_FW=y' \
+            "$CONFIG"
+
+          test -s \
+            target/linux/generic/files/drivers/mtd/mtdsplit/mtdsplit_tclinux.c
+
+          echo "=== image recipe ==="
+
+          grep -q \
+            'IMAGES := tclinux.trx' \
+            "$IMAGE_MK"
+
+          grep -q \
+            'IMAGE/tclinux.trx := append-kernel | lzma | tclinux-trx' \
+            "$IMAGE_MK"
+
+          echo
+          echo "ALL EN751221 PRE-BUILD VALIDATIONS PASSED"
+
+      - name: Build OpenWrt
+        id: build
+        shell: bash
+        run: |
+          set -eux
+          make -j$(($(nproc)+1)) V=s
+
+      - name: Save OpenWrt build tree
+        if: steps.build.outcome == 'success'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            build_dir
+            staging_dir
+          key: ${{ env.BUILD_CACHE_KEY }}
+
+      - name: Verify initramfs kernel image
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          IMG="bin/targets/econet/en751221/openwrt-econet-en751221-en751221_generic-initramfs-kernel.bin"
+
+          echo "=== en751221_generic outputs ==="
+          ls -l bin/targets/econet/en751221/ | grep en751221_generic || true
+
+          test -f "$IMG"
+          SIZE="$(stat -c '%s' "$IMG")"
+          echo "Image size: $SIZE bytes"
+          test "$SIZE" -gt 0
+
+          sha256sum "$IMG" | tee "$IMG.sha256"
+
+      - name: Verify NAND tclinux.trx image
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          OUT='bin/targets/econet/en751221'
+          TRX="$(find "$OUT" -maxdepth 1 -type f -name '*en751221_generic*-tclinux.trx' -print -quit)"
+          test -n "$TRX"
+          test -f "$TRX"
+
+          SIZE="$(stat -c '%s' "$TRX")"
+          echo "tclinux.trx: $TRX"
+          echo "tclinux.trx size: $SIZE bytes"
+          test "$SIZE" -gt 256
+          test "$SIZE" -le 31457280
+
+          python3 - "$TRX" <<'PY'
+          import struct
+          import sys
+          from pathlib import Path
+
+          p = Path(sys.argv[1])
+          b = p.read_bytes()
+          if b[:4] != b'2RDH':
+              raise SystemExit(f'bad tclinux magic: {b[:4]!r}')
+          _magic, hdrlen, total_len, crc, version, customer, kernel_len, rootfs_len, romfile_len = struct.unpack('>4sIII32s32sIII', b[:92])
+          if hdrlen != 256:
+              raise SystemExit(f'unexpected header length: {hdrlen}')
+          if total_len != len(b):
+              raise SystemExit(f'total_len {total_len} != file size {len(b)}')
+          payload_end = hdrlen + kernel_len + rootfs_len + romfile_len
+          if payload_end > len(b):
+              raise SystemExit('TRX payload lengths exceed file size')
+          print(f'header: total={total_len} kernel={kernel_len} rootfs={rootfs_len} romfile={romfile_len}')
+          print(f'header CRC32=0x{crc:08x}')
+          PY
+
+          sha256sum "$TRX" | tee "$TRX.sha256"
+          echo 'NAND tclinux.trx verification passed.'
+
+      - name: Save build metadata
+        shell: bash
+        run: |
+          set -eux
+          OUT="bin/targets/econet/en751221"
+          mkdir -p "$OUT/build-info"
+
+          cp .config "$OUT/build-info/config"
+          cp target/linux/econet/dts/en751221_generic.dts "$OUT/build-info/en751221_generic.dts"
+          cp target/linux/econet/en751221/config-6.18 "$OUT/build-info/en751221-kernel-config"
+          cp target/linux/econet/image/en751221.mk "$OUT/build-info/en751221-image.mk"
+          cp target/linux/generic/files/drivers/mtd/mtdsplit/mtdsplit_tclinux.c "$OUT/build-info/mtdsplit_tclinux.c"
+          cp package/kernel/econet-eth/patches/990-en751221-mtk-special-tag-four-ports.patch "$OUT/build-info/en751221-econet-eth-specialtag.patch"
+
+          git rev-parse HEAD > "$OUT/build-info/openwrt-revision.txt"
+          printf '%s\n' "$FEEDS_REV_HASH" > "$OUT/build-info/feeds-revision-hash.txt"
+          printf '%s\n' "$BUILD_CACHE_KEY" > "$OUT/build-info/build-cache-key.txt"
+          date -u > "$OUT/build-info/build-time-utc.txt"
+
+      - name: Upload Build
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-en751221-generic-initramfs
+          path: |
+            bin/targets/econet/en751221/*en751221_generic*
+            bin/targets/econet/en751221/build-info/
+          if-no-files-found: error
+          retention-days: 7
